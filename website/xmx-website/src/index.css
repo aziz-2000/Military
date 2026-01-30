@@ -1,0 +1,27 @@
+:root {
+  --primary: #b59b2a;
+  --dark: #1e1e1e;
+  --light: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+  font-family: "Tajawal", "Segoe UI", Tahoma, sans-serif;
+}
+
+body {
+  margin: 0;
+  direction: rtl;
+  background: #f5f5f5;
+  color: #222;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.container {
+  width: 90%;
+  margin: auto;
+}

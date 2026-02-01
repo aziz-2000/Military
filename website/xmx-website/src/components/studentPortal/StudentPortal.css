@@ -12,6 +12,16 @@
   overflow: hidden;
 }
 
+/* Global reset: let the page be the only scroll container */
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow-y: auto; /* only the page scrolls */
+}
+
 .login-wrapper {
   display: flex;
   width: 100%;
@@ -187,25 +197,28 @@
 /* Portal Dashboard Styles */
 .portal-container {
   min-height: 100vh;
-  height: 100vh;
   background-color: #f5f5f5;
   font-family: 'Tajawal', 'Arial', sans-serif;
   direction: rtl;
-  display: flex;
-  flex-direction: column;
+  margin: 0;
+  padding: 0;
 }
 
-.portal-header {
+/* Make header sticky instead of fixed (prevents nested scrollbars) */
+.portal-header{
+  position: sticky;
+  top: 0;
+  z-index: 999;
+
+  /* make height real and consistent */
+  height: 80px;
+  padding: 0 20px; /* remove vertical padding */
+  display: flex;
+  align-items: center;
+
   background: linear-gradient(135deg, #b59b2a 0%, #8a7520 100%);
   color: white;
-  padding: 20px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 999;
-  height: 80px;
 }
 
 .header-content {
@@ -238,28 +251,54 @@
   transform: translateY(-2px);
 }
 
-.portal-layout {
-  display: flex;
-  width: 100%;
-  gap: 20px;
-  padding: 20px;
-  flex: 1;
-  margin-top: 100px;
+/* place logout button at the far left of the header (visual left) */
+.portal-header .logout-btn {
+  position: absolute;
+  left: 20px; /* align with header horizontal padding */
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1000;
 }
 
-.portal-sidebar {
-  width: 250px;
+/* Layout: Sidebar on RIGHT, Content on LEFT (works with RTL reliably) */
+.portal-layout{
+  max-width: 1400px;
+  margin: 0 auto;
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px; /* content | sidebar */
+  grid-template-areas: "content sidebar";
+  gap: 20px;
+
+  /* remove the top empty space */
+  padding: 0 20px 20px;
+}
+
+/* Ensure grid columns are laid out left-to-right for predictable placement
+   while preserving RTL text inside children. This fixes RTL+grid ordering. */
+.portal-layout { direction: ltr; }
+
+/* Sidebar sticky, NO internal scroll */
+.portal-sidebar{
+  grid-area: sidebar;
+  justify-self: end; /* align to the right edge of its grid column */
+  width: 220px;
+
   background: white;
   border-radius: 10px;
-  padding: 20px;
+  padding: 10px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  height: calc(100vh - 140px);
-  position: fixed;
-  right: 20px;
-  top: 120px;
-  overflow-y: auto;
+
+  position: sticky;
+  top: 80px; /* EXACT header height */
+  margin-top: 0; /* no extra gap */
+  height: fit-content;
+  overflow: hidden; /* remove sidebar scrollbar */
   z-index: 998;
 }
+
+/* keep text inside the sidebar/content RTL for Arabic */
+.portal-sidebar, .portal-content { direction: rtl; }
 
 .portal-nav {
   display: flex;
@@ -270,15 +309,15 @@
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 12px 15px;
+  padding: 10px 12px;
   border: none;
   background: #f9f9f9;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.3s ease;
-  font-size: 0.95em;
+  font-size: 0.9em;
   text-align: right;
   color: #333;
   font-weight: 500;
@@ -294,19 +333,28 @@
 }
 
 .nav-icon {
-  font-size: 1.2em;
+  font-size: 1.1em;
+  flex-shrink: 0;
 }
 
-.portal-content {
-  flex: 1;
+.nav-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis; /* prevents long Arabic labels widening the sidebar */
+}
+
+/* Main content grows naturally, NO internal scroll */
+.portal-content{
+  grid-area: content;
+
   background: white;
   border-radius: 10px;
   padding: 30px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+
   min-height: 500px;
-  margin-right: 290px;
-  overflow-y: auto;
-  height: calc(100vh - 140px);
+  overflow: visible; /* remove content scrollbar */
+  margin-top: 0; /* no extra gap */
 }
 
 .content-section h2 {
@@ -666,13 +714,17 @@
 /* Responsive Design */
 @media (max-width: 768px) {
   .portal-layout {
-    flex-direction: column;
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "sidebar"
+      "content";
   }
 
   .portal-sidebar {
     width: 100%;
     position: relative;
-    top: 0;
+    top: auto;
+    justify-self: stretch;
   }
 
   .login-wrapper {
@@ -696,17 +748,13 @@
     gap: 15px;
   }
 
-  .portal-sidebar {
-    width: 100%;
-  }
-
   .portal-nav {
     flex-direction: row;
     flex-wrap: wrap;
   }
 
   .nav-item {
-    flex: 0 1 calc(50% - 5px);
+    flex: 0 1 calc(50% - 6px);
   }
 }
 
@@ -735,3 +783,5 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Hard override removed: layout controlled above via grid-areas */

@@ -1,4 +1,5 @@
 // pages/Services.jsx
+import { Link } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 
@@ -17,7 +18,9 @@ export default function Services() {
           <div style={styles.card} className="service-card">البريد الإلكتروني</div>
           <div style={styles.card} className="service-card">مركز مصادر التعلم</div>
           <div style={styles.card} className="service-card">الاختبارات</div>
-          <div style={styles.card} className="service-card">بوابتي</div>
+          <Link to="/student-portal" style={{ textDecoration: "none" }}>
+            <div style={styles.card} className="service-card">بوابتي</div>
+          </Link>
           <div style={styles.card} className="service-card">نظام الإعاشة</div>
           <div style={styles.card} className="service-card">خدمات تقنية المعلومات</div>
           <div style={styles.card} className="service-card">نظام الاستجابة السريعة</div>

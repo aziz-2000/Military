@@ -7,6 +7,7 @@ import Academics from "./pages/Academics";
 import Media from "./pages/Media";
 import Services from "./pages/Services";
 import Test from "./pages/Test";
+import StudentPortal from "./components/studentPortal/StudentPortal";
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/academics" element={<Academics />} />
         <Route path="/media" element={<Media />} />
         <Route path="/services" element={<Services />} />
+        <Route path="/student-portal" element={<StudentPortal />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </BrowserRouter>

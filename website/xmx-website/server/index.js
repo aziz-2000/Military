@@ -152,6 +152,39 @@ async function ensureUploadsDir() {
   await fs.mkdir(uploadsDir, { recursive: true });
 }
 
+async function ensureSavedReportsTable() {
+  await pool.query(`
+    create table if not exists core.saved_reports (
+      id          uuid primary key default gen_random_uuid(),
+      name        text not null,
+      description text,
+      report_type text not null default 'executive',
+      filters     jsonb not null default '{}'::jsonb,
+      created_by  uuid not null references auth.users(id) on delete cascade,
+      created_at  timestamptz not null default now(),
+      updated_at  timestamptz not null default now(),
+      unique (created_by, name)
+    )
+  `);
+  await pool.query(
+    `create index if not exists idx_saved_reports_user on core.saved_reports(created_by)`
+  );
+}
+
+async function ensureRankRolePoliciesTable() {
+  await pool.query(`
+    create table if not exists core.rank_role_policies (
+      rank_id     uuid not null references core.ranks(id) on delete cascade,
+      role_id     uuid not null references auth.roles(id) on delete cascade,
+      created_at  timestamptz not null default now(),
+      primary key (rank_id, role_id)
+    )
+  `);
+  await pool.query(
+    `create index if not exists idx_rank_role_policies_role on core.rank_role_policies(role_id)`
+  );
+}
+
 app.get("/api/health", async (req, res) => {
   try {
     const result = await pool.query("select 1 as ok");
@@ -1537,7 +1570,8 @@ app.get(
           c.code as course_code,
           c.title as course_title,
           cs.section_code,
-          t.name as term_name
+          t.name as term_name,
+          t.start_date as term_start_date
         from academics.course_sections cs
         join academics.courses c on c.id = cs.course_id
         join academics.terms t on t.id = cs.term_id
@@ -1546,7 +1580,7 @@ app.get(
         left join core.cohorts coh on coh.id = cand.cohort_id
         left join core.platoons pl on pl.id = cand.platoon_id
         ${whereClause}
-        order by t.start_date desc, c.code, cs.section_code
+        order by term_start_date desc, c.code, cs.section_code
         `,
         values
       );
@@ -2488,6 +2522,7 @@ app.get(
   requireRole(["admin"]),
   async (req, res) => {
     try {
+      await ensureSavedReportsTable();
       const userId = req.user.userId;
       const result = await pool.query(
         `
@@ -2514,6 +2549,7 @@ app.post(
   requireRole(["admin"]),
   async (req, res) => {
     try {
+      await ensureSavedReportsTable();
       const userId = req.user.userId;
       const { name, description, reportType, filters } = req.body || {};
 
@@ -2556,6 +2592,7 @@ app.delete(
   requireRole(["admin"]),
   async (req, res) => {
     try {
+      await ensureSavedReportsTable();
       const userId = req.user.userId;
       const reportId = req.params.id;
       const result = await pool.query(
@@ -3166,6 +3203,7 @@ app.get(
   requireRole(["admin"]),
   async (req, res) => {
     try {
+      await ensureRankRolePoliciesTable();
       const [rolesResult, permissionsResult, rolePermissionResult, usersResult, ranksResult, policiesResult] =
         await Promise.all([
           pool.query(
@@ -3332,6 +3370,7 @@ app.put(
   async (req, res) => {
     const client = await pool.connect();
     try {
+      await ensureRankRolePoliciesTable();
       const rankId = req.params.rankId;
       const roleIds = Array.isArray(req.body?.roleIds)
         ? req.body.roleIds.map((value) => String(value))
@@ -3369,6 +3408,7 @@ app.post(
   requireRole(["admin"]),
   async (req, res) => {
     try {
+      await ensureRankRolePoliciesTable();
       const result = await pool.query(
         `
         insert into auth.user_roles (user_id, role_id)

@@ -1693,13 +1693,34 @@ export default function AdminPortal() {
                         <button
                           className="admin-button secondary"
                           onClick={() => {
+                            const saved = item.filters || {};
+                            const mappedCohortId =
+                              saved.cohortId ||
+                              saved.cohort_id ||
+                              (saved.cohortNo || saved.cohort_no
+                                ? filters.cohorts.find(
+                                    (cohort) =>
+                                      Number(cohort.cohort_no) ===
+                                      Number(saved.cohortNo || saved.cohort_no)
+                                  )?.id
+                                : "");
+                            const mappedPlatoonId =
+                              saved.platoonId ||
+                              saved.platoon_id ||
+                              (saved.platoonNo || saved.platoon_no
+                                ? filters.platoons.find(
+                                    (platoon) =>
+                                      Number(platoon.platoon_no) ===
+                                      Number(saved.platoonNo || saved.platoon_no)
+                                  )?.id
+                                : "");
                             const nextFilters = {
-                              cohortId: item.filters?.cohortId || "",
-                              platoonId: item.filters?.platoonId || "",
-                              from: item.filters?.from || "",
-                              to: item.filters?.to || "",
-                              termId: item.filters?.termId || "",
-                              courseId: item.filters?.courseId || "",
+                              cohortId: mappedCohortId || "",
+                              platoonId: mappedPlatoonId || "",
+                              from: saved.from || saved.from_date || saved.dateFrom || "",
+                              to: saved.to || saved.to_date || saved.dateTo || "",
+                              termId: saved.termId || saved.term_id || "",
+                              courseId: saved.courseId || saved.course_id || "",
                             };
                             setReportFilters(nextFilters);
                             loadReports(nextFilters);

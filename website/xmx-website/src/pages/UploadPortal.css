@@ -1,0 +1,145 @@
+.upload-portal {
+  min-height: 100vh;
+  padding: 24px;
+  background: #f5f8ff;
+  color: #0f2557;
+}
+
+.upload-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.upload-header h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.upload-header p {
+  margin: 8px 0 0;
+  color: #5874a8;
+}
+
+.upload-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.upload-role {
+  font-size: 0.9rem;
+  color: #4e6696;
+}
+
+.upload-actions button {
+  border: 0;
+  background: #132b63;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.upload-card {
+  background: #fff;
+  border-radius: 16px;
+  border: 1px solid #dfe9ff;
+  padding: 18px;
+  box-shadow: 0 14px 32px rgba(14, 40, 94, 0.08);
+  margin-bottom: 16px;
+}
+
+.upload-card h2 {
+  margin: 0 0 12px;
+}
+
+.upload-form {
+  display: grid;
+  gap: 10px;
+}
+
+.upload-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.upload-input,
+.upload-select {
+  width: 100%;
+  border: 1px solid #d0ddfb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.upload-input:focus,
+.upload-select:focus {
+  outline: 0;
+  border-color: #406ad3;
+  box-shadow: 0 0 0 3px rgba(64, 106, 211, 0.14);
+}
+
+.upload-button {
+  border: 0;
+  background: #132b63;
+  color: #fff;
+  padding: 11px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.upload-button.secondary {
+  background: #e9efff;
+  color: #1a3779;
+}
+
+.upload-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.upload-state {
+  margin-top: 10px;
+  background: #ecf3ff;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.upload-state.error {
+  background: #ffe9e9;
+  color: #a11c1c;
+}
+
+.upload-table {
+  overflow-x: auto;
+}
+
+.upload-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.upload-table th,
+.upload-table td {
+  border-bottom: 1px solid #e9f0ff;
+  padding: 10px 8px;
+  text-align: left;
+}
+
+@media (max-width: 900px) {
+  .upload-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .upload-actions {
+    align-items: stretch;
+  }
+}

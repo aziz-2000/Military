@@ -153,6 +153,17 @@ body {
   font-size: 0.9em;
 }
 
+.success-message {
+  background-color: #e7f7ea;
+  border: 1px solid #bfe5c7;
+  color: #2f7a3e;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  text-align: center;
+  font-size: 0.9em;
+}
+
 .login-btn {
   width: 100%;
   padding: 12px;

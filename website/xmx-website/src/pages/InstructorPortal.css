@@ -212,10 +212,18 @@
 }
 
 .section-table th,
-.section-table td {
+.section-table td,
+.section-list th,
+.section-list td {
   padding: 12px;
   border-bottom: 1px solid #e5e7eb;
   text-align: right;
+}
+
+.section-list table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
 }
 
 .section-list .list-card {
@@ -273,6 +281,10 @@
 
 .section-list h4 {
   margin: 0 0 4px;
+}
+
+.section-list small {
+  color: var(--instructor-muted);
 }
 
 .empty {

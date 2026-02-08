@@ -143,6 +143,43 @@ function parseBoolean(value) {
   return null;
 }
 
+function parseDateTime(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function normalizePriority(value) {
+  const priority = normalizeString(value)?.toLowerCase();
+  if (!priority) return "normal";
+  if (["low", "normal", "high", "critical"].includes(priority)) return priority;
+  return null;
+}
+
+function normalizeWorkflowDecision(value) {
+  const decision = normalizeString(value)?.toLowerCase();
+  if (!decision) return null;
+  if (["in_review", "approve", "reject", "escalate"].includes(decision)) {
+    return decision;
+  }
+  return null;
+}
+
+async function candidateInInstructorScope(client, staffId, candidateId) {
+  const result = await client.query(
+    `
+    select 1
+    from academics.enrollments e
+    join academics.course_sections cs on cs.id = e.section_id
+    where cs.instructor_staff_id = $1 and e.candidate_id = $2
+    limit 1
+    `,
+    [staffId, candidateId]
+  );
+  return result.rowCount > 0;
+}
+
 function sanitizeFilename(filename) {
   const base = normalizeString(filename) || "file";
   return base.replace(/[^a-zA-Z0-9.\-_]/g, "_");
@@ -182,6 +219,69 @@ async function ensureRankRolePoliciesTable() {
   `);
   await pool.query(
     `create index if not exists idx_rank_role_policies_role on core.rank_role_policies(role_id)`
+  );
+}
+
+async function ensureWorkflowSchema() {
+  await pool.query(`
+    alter table core.requests
+      add column if not exists priority text not null default 'normal',
+      add column if not exists assigned_to uuid references auth.users(id) on delete set null,
+      add column if not exists due_at timestamptz,
+      add column if not exists required_approvals int not null default 2,
+      add column if not exists approval_count int not null default 0,
+      add column if not exists closed_at timestamptz,
+      add column if not exists updated_at timestamptz not null default now(),
+      add column if not exists last_decision_at timestamptz,
+      add column if not exists last_decision_by uuid references auth.users(id) on delete set null
+  `);
+
+  await pool.query(`
+    do $$
+    begin
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'chk_requests_priority'
+      ) then
+        alter table core.requests
+          add constraint chk_requests_priority
+          check (priority in ('low', 'normal', 'high', 'critical'));
+      end if;
+
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'chk_requests_approvals'
+      ) then
+        alter table core.requests
+          add constraint chk_requests_approvals
+          check (
+            required_approvals >= 1
+            and approval_count >= 0
+            and approval_count <= required_approvals
+          );
+      end if;
+    end $$;
+  `);
+
+  await pool.query(`
+    alter table core.request_actions
+      add column if not exists approval_level int,
+      add column if not exists metadata jsonb not null default '{}'::jsonb
+  `);
+
+  await pool.query(
+    `create index if not exists idx_requests_assigned_to on core.requests(assigned_to)`
+  );
+  await pool.query(
+    `create index if not exists idx_requests_priority on core.requests(priority)`
+  );
+  await pool.query(
+    `create index if not exists idx_requests_due_at on core.requests(due_at)`
+  );
+  await pool.query(
+    `create index if not exists idx_request_actions_approval_level on core.request_actions(approval_level)`
   );
 }
 
@@ -2078,6 +2178,76 @@ function buildCsv(headers, rows) {
   return `\uFEFF${lines.join("\n")}`;
 }
 
+function sanitizePdfText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/[^\x20-\x7E]/g, "?")
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
+}
+
+function buildSimplePdf({ title, subtitle, headers, rows }) {
+  const safeTitle = sanitizePdfText(title);
+  const safeSubtitle = sanitizePdfText(subtitle);
+  const headerLine = sanitizePdfText(headers.join(" | "));
+  const lines = [headerLine, "-".repeat(Math.min(headerLine.length, 120))];
+
+  rows.slice(0, 70).forEach((row) => {
+    const line = headers
+      .map((header, index) => `${header}:${sanitizePdfText(row[index])}`)
+      .join(" | ");
+    lines.push(line.slice(0, 180));
+  });
+
+  const startY = 760;
+  const lineHeight = 12;
+  const contentLines = [
+    "BT",
+    "/F1 14 Tf",
+    `50 ${startY} Td`,
+    `(${safeTitle}) Tj`,
+    "0 -18 Td",
+    "/F1 10 Tf",
+    `(${safeSubtitle}) Tj`,
+    "0 -18 Td",
+  ];
+
+  lines.forEach((line) => {
+    contentLines.push(`(${sanitizePdfText(line)}) Tj`);
+    contentLines.push(`0 -${lineHeight} Td`);
+  });
+  contentLines.push("ET");
+
+  const contentStream = contentLines.join("\n");
+  const contentLength = Buffer.byteLength(contentStream, "utf8");
+
+  const objects = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    `5 0 obj\n<< /Length ${contentLength} >>\nstream\n${contentStream}\nendstream\nendobj\n`,
+  ];
+
+  let pdf = "%PDF-1.4\n";
+  const xrefOffsets = [0];
+  objects.forEach((object) => {
+    xrefOffsets.push(Buffer.byteLength(pdf, "utf8"));
+    pdf += object;
+  });
+
+  const xrefStart = Buffer.byteLength(pdf, "utf8");
+  pdf += `xref\n0 ${xrefOffsets.length}\n`;
+  pdf += "0000000000 65535 f \n";
+  xrefOffsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${xrefOffsets.length} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+  return Buffer.from(pdf, "utf8");
+}
+
 app.get(
   "/api/admin/reports/summary",
   requireAuth,
@@ -2710,6 +2880,138 @@ app.get(
         dateRangeValues
       );
 
+      const highAbsenceAlertsPromise = pool.query(
+        `
+        select
+          c.id as candidate_id,
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          round(
+            (sum(case when a.present then 1 else 0 end)::numeric / nullif(count(*), 0)) * 100,
+            2
+          ) as attendance_rate
+        from academics.attendance a
+        join academics.attendance_sessions s on s.id = a.attendance_session_id
+        join core.candidates c on c.id = a.candidate_id
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${buildDateWhere("s.session_at::date")}
+        group by c.id, c.candidate_no, p.first_name, p.last_name
+        having round(
+          (sum(case when a.present then 1 else 0 end)::numeric / nullif(count(*), 0)) * 100,
+          2
+        ) < 75
+        order by attendance_rate asc
+        limit 10
+        `,
+        dateRangeValues
+      );
+
+      const lowGradesAlertsPromise = pool.query(
+        `
+        select
+          c.id as candidate_id,
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          round(avg(g.score)::numeric, 2) as average_score
+        from academics.grades g
+        join core.candidates c on c.id = g.candidate_id
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${buildDateWhere("g.graded_at::date")}
+        group by c.id, c.candidate_no, p.first_name, p.last_name
+        having round(avg(g.score)::numeric, 2) < 60
+        order by average_score asc
+        limit 10
+        `,
+        dateRangeValues
+      );
+
+      const criticalMedicalAlertsPromise = pool.query(
+        `
+        select
+          c.id as candidate_id,
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          er.fit_status,
+          coalesce(e.performed_at, e.scheduled_at, er.recorded_at) as event_at
+        from medical.exam_results er
+        join medical.exams e on e.id = er.exam_id
+        join core.candidates c on c.id = e.candidate_id
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${buildDateWhere("coalesce(e.performed_at, e.scheduled_at, er.recorded_at)::date")}
+          and er.fit_status in ('unfit', 'fit_with_limits')
+        order by event_at desc
+        limit 10
+        `,
+        dateRangeValues
+      );
+
+      const agingRequestsAlertsPromise = pool.query(
+        `
+        select count(*)::int as count
+        from core.requests r
+        join core.candidates c on c.id = r.candidate_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${cohortWhere ? `${cohortWhere} and r.status in ('submitted', 'in_review') and r.submitted_at < now() - interval '7 days'` : "where r.status in ('submitted', 'in_review') and r.submitted_at < now() - interval '7 days'"}
+        `,
+        cohortValues
+      );
+
+      const weeklyAttendancePromise = pool.query(
+        `
+        select round(
+          (sum(case when a.present then 1 else 0 end)::numeric / nullif(count(a.id), 0)) * 100,
+          2
+        ) as attendance_rate
+        from academics.attendance a
+        join academics.attendance_sessions s on s.id = a.attendance_session_id
+        join core.candidates c on c.id = a.candidate_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${cohortWhere ? `${cohortWhere} and s.session_at >= now() - interval '7 days'` : "where s.session_at >= now() - interval '7 days'"}
+        `,
+        cohortValues
+      );
+
+      const weeklyGradesPromise = pool.query(
+        `
+        select round(avg(g.score)::numeric, 2) as average_score
+        from academics.grades g
+        join core.candidates c on c.id = g.candidate_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${cohortWhere ? `${cohortWhere} and g.graded_at >= now() - interval '7 days'` : "where g.graded_at >= now() - interval '7 days'"}
+        `,
+        cohortValues
+      );
+
+      const weeklyRequestsPromise = pool.query(
+        `
+        select count(*)::int as count
+        from core.requests r
+        join core.candidates c on c.id = r.candidate_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${cohortWhere ? `${cohortWhere} and r.submitted_at >= now() - interval '7 days'` : "where r.submitted_at >= now() - interval '7 days'"}
+        `,
+        cohortValues
+      );
+
+      const weeklyCriticalMedicalPromise = pool.query(
+        `
+        select count(*)::int as count
+        from medical.exam_results er
+        join medical.exams e on e.id = er.exam_id
+        join core.candidates c on c.id = e.candidate_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        ${cohortWhere ? `${cohortWhere} and coalesce(e.performed_at, e.scheduled_at, er.recorded_at) >= now() - interval '7 days'` : "where coalesce(e.performed_at, e.scheduled_at, er.recorded_at) >= now() - interval '7 days'"}
+          and er.fit_status in ('unfit', 'fit_with_limits')
+        `,
+        cohortValues
+      );
+
       const averageGradePromise = pool.query(
         `
         select round(avg(g.score)::numeric, 2) as average_score
@@ -2855,6 +3157,14 @@ app.get(
         gradesMonthlyResult,
         medicalStatusResult,
         topAbsencesResult,
+        highAbsenceAlertsResult,
+        lowGradesAlertsResult,
+        criticalMedicalAlertsResult,
+        agingRequestsAlertsResult,
+        weeklyAttendanceResult,
+        weeklyGradesResult,
+        weeklyRequestsResult,
+        weeklyCriticalMedicalResult,
       ] = await Promise.all([
         totalCandidatesPromise,
         enrolledCandidatesPromise,
@@ -2867,7 +3177,52 @@ app.get(
         gradesMonthlyPromise,
         medicalStatusPromise,
         topAbsencesPromise,
+        highAbsenceAlertsPromise,
+        lowGradesAlertsPromise,
+        criticalMedicalAlertsPromise,
+        agingRequestsAlertsPromise,
+        weeklyAttendancePromise,
+        weeklyGradesPromise,
+        weeklyRequestsPromise,
+        weeklyCriticalMedicalPromise,
       ]);
+
+      const alerts = [];
+      if ((highAbsenceAlertsResult.rows || []).length > 0) {
+        alerts.push({
+          type: "attendance",
+          severity: "high",
+          title: "ارتفاع الغياب",
+          description: `عدد المرشحين دون 75% حضور: ${highAbsenceAlertsResult.rows.length}`,
+          rows: highAbsenceAlertsResult.rows,
+        });
+      }
+      if ((lowGradesAlertsResult.rows || []).length > 0) {
+        alerts.push({
+          type: "grades",
+          severity: "high",
+          title: "انخفاض الدرجات",
+          description: `عدد المرشحين دون 60 درجة: ${lowGradesAlertsResult.rows.length}`,
+          rows: lowGradesAlertsResult.rows,
+        });
+      }
+      if ((criticalMedicalAlertsResult.rows || []).length > 0) {
+        alerts.push({
+          type: "medical",
+          severity: "critical",
+          title: "حالات طبية حرجة",
+          description: `عدد الحالات الحرجة: ${criticalMedicalAlertsResult.rows.length}`,
+          rows: criticalMedicalAlertsResult.rows,
+        });
+      }
+      if (Number(agingRequestsAlertsResult.rows[0]?.count || 0) > 0) {
+        alerts.push({
+          type: "requests",
+          severity: "medium",
+          title: "طلبات متأخرة",
+          description: `طلبات تتجاوز 7 أيام دون إغلاق: ${agingRequestsAlertsResult.rows[0]?.count || 0}`,
+        });
+      }
 
       return res.json({
         summary: {
@@ -2883,6 +3238,13 @@ app.get(
         gradesMonthly: gradesMonthlyResult.rows,
         medicalStatus: medicalStatusResult.rows,
         topAbsences: topAbsencesResult.rows,
+        alerts,
+        weekly: {
+          attendanceRate: Number(weeklyAttendanceResult.rows[0]?.attendance_rate || 0),
+          averageGrade: Number(weeklyGradesResult.rows[0]?.average_score || 0),
+          newRequests: Number(weeklyRequestsResult.rows[0]?.count || 0),
+          criticalMedical: Number(weeklyCriticalMedicalResult.rows[0]?.count || 0),
+        },
       });
     } catch (error) {
       console.error("Leadership overview error:", error);
@@ -2890,6 +3252,47 @@ app.get(
     }
   }
 );
+
+function parseScopeReportFilters(query) {
+  return {
+    cohortId: query.cohort_id ? String(query.cohort_id) : null,
+    cohortNo: query.cohort_no ? Number(query.cohort_no) : null,
+    platoonId: query.platoon_id ? String(query.platoon_id) : null,
+    platoonNo: query.platoon_no ? Number(query.platoon_no) : null,
+  };
+}
+
+function buildScopeWhereClause({ cohortId, cohortNo, platoonId, platoonNo }) {
+  const conditions = [];
+  const values = [];
+  let index = 1;
+
+  if (cohortId) {
+    conditions.push(`coh.id = $${index}`);
+    values.push(cohortId);
+    index += 1;
+  } else if (cohortNo) {
+    conditions.push(`coh.cohort_no = $${index}`);
+    values.push(cohortNo);
+    index += 1;
+  }
+
+  if (platoonId) {
+    conditions.push(`pl.id = $${index}`);
+    values.push(platoonId);
+    index += 1;
+  } else if (platoonNo) {
+    conditions.push(`pl.platoon_no = $${index}`);
+    values.push(platoonNo);
+    index += 1;
+  }
+
+  return {
+    whereClause: conditions.length ? `where ${conditions.join(" and ")}` : "",
+    values,
+    nextIndex: index,
+  };
+}
 
 app.get(
   "/api/admin/reports/candidates.csv",
@@ -3198,6 +3601,268 @@ app.get(
 );
 
 app.get(
+  "/api/admin/reports/candidates.pdf",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      const scope = parseScopeReportFilters(req.query);
+      const { whereClause, values } = buildScopeWhereClause(scope);
+      const result = await pool.query(
+        `
+        select
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          coh.cohort_no,
+          pl.platoon_no,
+          c.background,
+          c.military_no,
+          c.status
+        from core.candidates c
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        left join core.platoons pl on pl.id = c.platoon_id
+        ${whereClause}
+        order by coh.cohort_no desc nulls last, pl.platoon_no asc nulls last, c.candidate_no
+        limit 80
+        `,
+        values
+      );
+
+      const pdf = buildSimplePdf({
+        title: "Official Candidates Report",
+        subtitle: `Generated: ${new Date().toISOString()}`,
+        headers: ["CandidateNo", "Name", "Cohort", "Platoon", "Background", "MilitaryNo", "Status"],
+        rows: result.rows.map((row) => [
+          row.candidate_no || "",
+          `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+          row.cohort_no || "",
+          row.platoon_no || "",
+          row.background || "",
+          row.military_no || "",
+          row.status || "",
+        ]),
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        "attachment; filename=\"candidates_report.pdf\""
+      );
+      return res.send(pdf);
+    } catch (error) {
+      console.error("Candidates PDF report error:", error);
+      return res.status(500).json({ message: "تعذر تصدير PDF المرشحين." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/reports/attendance.pdf",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      const scope = parseScopeReportFilters(req.query);
+      const fromDate = req.query.from ? String(req.query.from) : null;
+      const toDate = req.query.to ? String(req.query.to) : null;
+
+      const conditions = [];
+      const values = [];
+      let index = 1;
+
+      if (scope.cohortId) {
+        conditions.push(`coh.id = $${index}`);
+        values.push(scope.cohortId);
+        index += 1;
+      } else if (scope.cohortNo) {
+        conditions.push(`coh.cohort_no = $${index}`);
+        values.push(scope.cohortNo);
+        index += 1;
+      }
+      if (scope.platoonId) {
+        conditions.push(`pl.id = $${index}`);
+        values.push(scope.platoonId);
+        index += 1;
+      } else if (scope.platoonNo) {
+        conditions.push(`pl.platoon_no = $${index}`);
+        values.push(scope.platoonNo);
+        index += 1;
+      }
+      if (fromDate) {
+        conditions.push(`s.session_at::date >= $${index}`);
+        values.push(fromDate);
+        index += 1;
+      }
+      if (toDate) {
+        conditions.push(`s.session_at::date <= $${index}`);
+        values.push(toDate);
+        index += 1;
+      }
+
+      const whereClause = conditions.length
+        ? `where ${conditions.join(" and ")}`
+        : "";
+      const result = await pool.query(
+        `
+        select
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          coh.cohort_no,
+          pl.platoon_no,
+          count(*)::int as total_sessions,
+          sum(case when a.present then 1 else 0 end)::int as present_sessions,
+          sum(case when a.present = false then 1 else 0 end)::int as absent_sessions,
+          round(
+            (sum(case when a.present then 1 else 0 end)::numeric / nullif(count(*), 0)) * 100,
+            2
+          ) as attendance_rate
+        from academics.attendance a
+        join academics.attendance_sessions s on s.id = a.attendance_session_id
+        join core.candidates c on c.id = a.candidate_id
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        left join core.platoons pl on pl.id = c.platoon_id
+        ${whereClause}
+        group by c.candidate_no, p.first_name, p.last_name, coh.cohort_no, pl.platoon_no
+        order by attendance_rate asc nulls last, c.candidate_no
+        limit 80
+        `,
+        values
+      );
+
+      const pdf = buildSimplePdf({
+        title: "Official Attendance Report",
+        subtitle: `Generated: ${new Date().toISOString()}`,
+        headers: ["CandidateNo", "Name", "Cohort", "Platoon", "Present", "Absent", "Rate%"],
+        rows: result.rows.map((row) => [
+          row.candidate_no || "",
+          `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+          row.cohort_no || "",
+          row.platoon_no || "",
+          row.present_sessions || 0,
+          row.absent_sessions || 0,
+          row.attendance_rate || 0,
+        ]),
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        "attachment; filename=\"attendance_report.pdf\""
+      );
+      return res.send(pdf);
+    } catch (error) {
+      console.error("Attendance PDF report error:", error);
+      return res.status(500).json({ message: "تعذر تصدير PDF الحضور." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/reports/grades.pdf",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      const scope = parseScopeReportFilters(req.query);
+      const termId = req.query.term_id ? String(req.query.term_id) : null;
+      const courseId = req.query.course_id ? String(req.query.course_id) : null;
+
+      const conditions = [];
+      const values = [];
+      let index = 1;
+
+      if (scope.cohortId) {
+        conditions.push(`coh.id = $${index}`);
+        values.push(scope.cohortId);
+        index += 1;
+      } else if (scope.cohortNo) {
+        conditions.push(`coh.cohort_no = $${index}`);
+        values.push(scope.cohortNo);
+        index += 1;
+      }
+      if (scope.platoonId) {
+        conditions.push(`pl.id = $${index}`);
+        values.push(scope.platoonId);
+        index += 1;
+      } else if (scope.platoonNo) {
+        conditions.push(`pl.platoon_no = $${index}`);
+        values.push(scope.platoonNo);
+        index += 1;
+      }
+      if (termId) {
+        conditions.push(`cs.term_id = $${index}`);
+        values.push(termId);
+        index += 1;
+      }
+      if (courseId) {
+        conditions.push(`cs.course_id = $${index}`);
+        values.push(courseId);
+        index += 1;
+      }
+
+      const whereClause = conditions.length
+        ? `where ${conditions.join(" and ")}`
+        : "";
+      const result = await pool.query(
+        `
+        select
+          c.candidate_no,
+          p.first_name,
+          p.last_name,
+          coh.cohort_no,
+          pl.platoon_no,
+          course.code as course_code,
+          a.name as assessment_name,
+          g.score,
+          a.max_score
+        from academics.grades g
+        join academics.assessments a on a.id = g.assessment_id
+        join academics.course_sections cs on cs.id = a.section_id
+        join academics.courses course on course.id = cs.course_id
+        join core.candidates c on c.id = g.candidate_id
+        join core.people p on p.id = c.person_id
+        left join core.cohorts coh on coh.id = c.cohort_id
+        left join core.platoons pl on pl.id = c.platoon_id
+        ${whereClause}
+        order by coh.cohort_no desc nulls last, c.candidate_no, course.code
+        limit 80
+        `,
+        values
+      );
+
+      const pdf = buildSimplePdf({
+        title: "Official Grades Report",
+        subtitle: `Generated: ${new Date().toISOString()}`,
+        headers: ["CandidateNo", "Name", "Cohort", "Course", "Assessment", "Score", "Max"],
+        rows: result.rows.map((row) => [
+          row.candidate_no || "",
+          `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+          row.cohort_no || "",
+          row.course_code || "",
+          row.assessment_name || "",
+          row.score || 0,
+          row.max_score || 0,
+        ]),
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        "attachment; filename=\"grades_report.pdf\""
+      );
+      return res.send(pdf);
+    } catch (error) {
+      console.error("Grades PDF report error:", error);
+      return res.status(500).json({ message: "تعذر تصدير PDF الدرجات." });
+    }
+  }
+);
+
+app.get(
   "/api/admin/security/overview",
   requireAuth,
   requireRole(["admin"]),
@@ -3427,6 +4092,414 @@ app.post(
 );
 
 app.get(
+  "/api/admin/workflow/filters",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      await ensureWorkflowSchema();
+      const [typesResult, assigneesResult] = await Promise.all([
+        pool.query(
+          `
+          select distinct request_type
+          from core.requests
+          where request_type is not null and request_type <> ''
+          order by request_type
+          `
+        ),
+        pool.query(
+          `
+          select
+            u.id,
+            u.username,
+            p.first_name,
+            p.last_name
+          from auth.users u
+          left join core.staff s on s.user_id = u.id
+          left join core.people p on p.id = s.person_id
+          where u.status = 'active'
+          order by u.username
+          `
+        ),
+      ]);
+
+      return res.json({
+        statuses: ["submitted", "in_review", "approved", "rejected", "cancelled"],
+        priorities: ["low", "normal", "high", "critical"],
+        requestTypes: typesResult.rows.map((row) => row.request_type),
+        assignees: assigneesResult.rows,
+      });
+    } catch (error) {
+      console.error("Workflow filters error:", error);
+      return res.status(500).json({ message: "تعذر تحميل فلاتر سير الإجراءات." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/workflow/requests",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      await ensureWorkflowSchema();
+      const search = normalizeString(req.query.search)?.toLowerCase() || null;
+      const status = normalizeString(req.query.status);
+      const requestType = normalizeString(req.query.request_type);
+      const priority = normalizeString(req.query.priority);
+      const assignedTo = normalizeString(req.query.assigned_to);
+      const cohortId = normalizeString(req.query.cohort_id);
+      const cohortNo = parseInteger(req.query.cohort_no);
+      const platoonId = normalizeString(req.query.platoon_id);
+      const platoonNo = parseInteger(req.query.platoon_no);
+      const limit = Math.min(Number(req.query.limit) || 100, 300);
+      const offset = Number(req.query.offset) || 0;
+
+      const conditions = [];
+      const values = [];
+      let index = 1;
+
+      if (search) {
+        conditions.push(
+          `(lower(r.title) like $${index}
+            or lower(coalesce(r.body, '')) like $${index}
+            or lower(coalesce(c.candidate_no, '')) like $${index}
+            or lower(coalesce(c.military_no, '')) like $${index}
+            or lower(coalesce(p.first_name, '')) like $${index}
+            or lower(coalesce(p.last_name, '')) like $${index})`
+        );
+        values.push(`%${search}%`);
+        index += 1;
+      }
+
+      if (status) {
+        conditions.push(`r.status = $${index}`);
+        values.push(status);
+        index += 1;
+      }
+
+      if (requestType) {
+        conditions.push(`r.request_type = $${index}`);
+        values.push(requestType);
+        index += 1;
+      }
+
+      if (priority) {
+        conditions.push(`r.priority = $${index}`);
+        values.push(priority);
+        index += 1;
+      }
+
+      if (assignedTo) {
+        conditions.push(`r.assigned_to = $${index}`);
+        values.push(assignedTo);
+        index += 1;
+      }
+
+      if (cohortId) {
+        conditions.push(`coh.id = $${index}`);
+        values.push(cohortId);
+        index += 1;
+      } else if (cohortNo !== null) {
+        conditions.push(`coh.cohort_no = $${index}`);
+        values.push(cohortNo);
+        index += 1;
+      }
+
+      if (platoonId) {
+        conditions.push(`pl.id = $${index}`);
+        values.push(platoonId);
+        index += 1;
+      } else if (platoonNo !== null) {
+        conditions.push(`pl.platoon_no = $${index}`);
+        values.push(platoonNo);
+        index += 1;
+      }
+
+      const whereClause = conditions.length
+        ? `where ${conditions.join(" and ")}`
+        : "";
+
+      const [rowsResult, totalResult] = await Promise.all([
+        pool.query(
+          `
+          select
+            r.id,
+            r.request_type,
+            r.title,
+            r.body,
+            r.status,
+            r.priority,
+            r.approval_count,
+            r.required_approvals,
+            r.submitted_at,
+            r.updated_at,
+            r.due_at,
+            r.last_decision_at,
+            r.candidate_id,
+            c.candidate_no,
+            c.military_no,
+            p.first_name,
+            p.last_name,
+            coh.id as cohort_id,
+            coh.cohort_no,
+            pl.id as platoon_id,
+            pl.platoon_no,
+            r.assigned_to,
+            assignee.username as assigned_username,
+            decider.username as last_decision_by_username
+          from core.requests r
+          left join core.candidates c on c.id = r.candidate_id
+          left join core.people p on p.id = c.person_id
+          left join core.cohorts coh on coh.id = c.cohort_id
+          left join core.platoons pl on pl.id = c.platoon_id
+          left join auth.users assignee on assignee.id = r.assigned_to
+          left join auth.users decider on decider.id = r.last_decision_by
+          ${whereClause}
+          order by
+            case r.priority
+              when 'critical' then 1
+              when 'high' then 2
+              when 'normal' then 3
+              else 4
+            end,
+            coalesce(r.due_at, r.submitted_at) asc
+          limit $${index} offset $${index + 1}
+          `,
+          [...values, limit, offset]
+        ),
+        pool.query(
+          `
+          select count(*)::int as total
+          from core.requests r
+          left join core.candidates c on c.id = r.candidate_id
+          left join core.people p on p.id = c.person_id
+          left join core.cohorts coh on coh.id = c.cohort_id
+          left join core.platoons pl on pl.id = c.platoon_id
+          ${whereClause}
+          `,
+          values
+        ),
+      ]);
+
+      return res.json({
+        rows: rowsResult.rows,
+        total: totalResult.rows[0]?.total || 0,
+      });
+    } catch (error) {
+      console.error("Workflow requests list error:", error);
+      return res.status(500).json({ message: "تعذر تحميل طلبات سير الإجراءات." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/workflow/requests/:id/actions",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    try {
+      await ensureWorkflowSchema();
+      const requestId = req.params.id;
+      const result = await pool.query(
+        `
+        select
+          ra.id,
+          ra.action,
+          ra.note,
+          ra.acted_at,
+          ra.approval_level,
+          ra.metadata,
+          u.username as acted_by_username
+        from core.request_actions ra
+        left join auth.users u on u.id = ra.acted_by
+        where ra.request_id = $1
+        order by ra.acted_at desc
+        `,
+        [requestId]
+      );
+      return res.json({ rows: result.rows });
+    } catch (error) {
+      console.error("Workflow actions list error:", error);
+      return res.status(500).json({ message: "تعذر تحميل سجل القرارات." });
+    }
+  }
+);
+
+app.put(
+  "/api/admin/workflow/requests/:id/assign",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureWorkflowSchema();
+      const requestId = req.params.id;
+      const assignedTo = normalizeString(req.body?.assignedTo);
+      const parsedPriority = normalizePriority(req.body?.priority);
+      const dueAt = parseDateTime(req.body?.dueAt);
+      const note = normalizeString(req.body?.note);
+
+      if (req.body?.priority !== undefined && parsedPriority === null) {
+        return res.status(400).json({ message: "قيمة الأولوية غير صالحة." });
+      }
+
+      await client.query("begin");
+      const updateResult = await client.query(
+        `
+        update core.requests
+        set
+          assigned_to = $1,
+          priority = $2,
+          due_at = $3,
+          status = case when status = 'submitted' then 'in_review' else status end,
+          updated_at = now()
+        where id = $4
+        returning id
+        `,
+        [assignedTo, parsedPriority || "normal", dueAt, requestId]
+      );
+
+      if (updateResult.rowCount === 0) {
+        await client.query("rollback");
+        return res.status(404).json({ message: "الطلب غير موجود." });
+      }
+
+      await client.query(
+        `
+        insert into core.request_actions (
+          request_id,
+          action,
+          note,
+          acted_by,
+          metadata
+        )
+        values ($1, 'workflow_assignment', $2, $3, $4::jsonb)
+        `,
+        [
+          requestId,
+          note,
+          req.user.userId,
+          JSON.stringify({
+            assignedTo,
+            priority: parsedPriority || "normal",
+            dueAt,
+          }),
+        ]
+      );
+
+      await client.query("commit");
+      return res.json({ updated: true });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Workflow assign error:", error);
+      return res.status(500).json({ message: "تعذر تحديث التعيين." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.post(
+  "/api/admin/workflow/requests/:id/comment",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureWorkflowSchema();
+      const requestId = req.params.id;
+      const note = normalizeString(req.body?.note);
+      if (!note) {
+        return res.status(400).json({ message: "يرجى إدخال تعليق." });
+      }
+
+      const existsResult = await client.query(
+        `select id from core.requests where id = $1`,
+        [requestId]
+      );
+      if (existsResult.rowCount === 0) {
+        return res.status(404).json({ message: "الطلب غير موجود." });
+      }
+
+      await client.query("begin");
+      await client.query(
+        `update core.requests set updated_at = now() where id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `
+        insert into core.request_actions (request_id, action, note, acted_by)
+        values ($1, 'workflow_comment', $2, $3)
+        `,
+        [requestId, note, req.user.userId]
+      );
+      await client.query("commit");
+      return res.status(201).json({ created: true });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Workflow comment error:", error);
+      return res.status(500).json({ message: "تعذر حفظ التعليق." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.put(
+  "/api/admin/workflow/requests/:id/decision",
+  requireAuth,
+  requireRole(["admin"]),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureWorkflowSchema();
+      const requestId = req.params.id;
+      const note = normalizeString(req.body?.note);
+      const requiredApprovalsInput = parseInteger(req.body?.requiredApprovals);
+
+      await client.query("begin");
+
+      if (requiredApprovalsInput !== null && requiredApprovalsInput >= 1) {
+        await client.query(
+          `
+          update core.requests
+          set required_approvals = greatest($2, approval_count),
+              updated_at = now()
+          where id = $1
+          `,
+          [requestId, requiredApprovalsInput]
+        );
+      }
+
+      const result = await applyWorkflowDecision(client, {
+        requestId,
+        decision: req.body?.decision,
+        note,
+        actorUserId: req.user.userId,
+      });
+
+      await client.query("commit");
+      return res.json({
+        updated: true,
+        status: result.status,
+        approvalCount: result.approvalCount,
+        requiredApprovals: result.requiredApprovals,
+      });
+    } catch (error) {
+      await client.query("rollback");
+      const status = Number(error.status) || 500;
+      console.error("Workflow decision error:", error);
+      return res.status(status).json({
+        message: status === 500 ? "تعذر معالجة قرار سير الإجراءات." : error.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.get(
   "/api/upload/files",
   requireAuth,
   requireRole(["uploader", "admin"]),
@@ -3639,6 +4712,135 @@ async function getInstructorStaffId(userId) {
   return result.rows[0].id;
 }
 
+async function applyWorkflowDecision(client, { requestId, decision, note, actorUserId }) {
+  const normalizedDecision = normalizeWorkflowDecision(decision);
+  if (!normalizedDecision) {
+    const error = new Error("قرار غير صالح.");
+    error.status = 400;
+    throw error;
+  }
+
+  if (normalizedDecision === "reject" && !normalizeString(note)) {
+    const error = new Error("يرجى إدخال سبب الرفض.");
+    error.status = 400;
+    throw error;
+  }
+
+  const requestResult = await client.query(
+    `
+    select
+      id,
+      status,
+      approval_count,
+      required_approvals
+    from core.requests
+    where id = $1
+    for update
+    `,
+    [requestId]
+  );
+
+  if (requestResult.rowCount === 0) {
+    const error = new Error("الطلب غير موجود.");
+    error.status = 404;
+    throw error;
+  }
+
+  const requestRow = requestResult.rows[0];
+  const fromStatus = requestRow.status;
+  const currentApprovals = Number(requestRow.approval_count || 0);
+  const requiredApprovals = Number(requestRow.required_approvals || 2);
+
+  if (
+    ["approved", "rejected", "cancelled"].includes(fromStatus) &&
+    normalizedDecision !== "escalate"
+  ) {
+    const error = new Error("لا يمكن تعديل طلب مغلق.");
+    error.status = 409;
+    throw error;
+  }
+
+  let nextStatus = fromStatus;
+  let nextApprovals = currentApprovals;
+  let nextRequiredApprovals = requiredApprovals;
+  let actionName = "workflow_comment";
+
+  if (normalizedDecision === "in_review") {
+    nextStatus = "in_review";
+    actionName = "workflow_in_review";
+  }
+
+  if (normalizedDecision === "approve") {
+    nextApprovals = Math.min(requiredApprovals, currentApprovals + 1);
+    nextStatus = nextApprovals >= requiredApprovals ? "approved" : "in_review";
+    actionName =
+      nextStatus === "approved"
+        ? "workflow_approved_final"
+        : "workflow_approved_level";
+  }
+
+  if (normalizedDecision === "reject") {
+    nextStatus = "rejected";
+    actionName = "workflow_rejected";
+  }
+
+  if (normalizedDecision === "escalate") {
+    nextStatus = "in_review";
+    nextRequiredApprovals = Math.min(5, Math.max(requiredApprovals + 1, currentApprovals + 1));
+    actionName = "workflow_escalated";
+  }
+
+  await client.query(
+    `
+    update core.requests
+    set
+      status = $1,
+      approval_count = $2,
+      required_approvals = $3,
+      updated_at = now(),
+      last_decision_at = now(),
+      last_decision_by = $4,
+      closed_at = case when $1 in ('approved', 'rejected', 'cancelled') then now() else null end
+    where id = $5
+    `,
+    [nextStatus, nextApprovals, nextRequiredApprovals, actorUserId, requestId]
+  );
+
+  await client.query(
+    `
+    insert into core.request_actions (
+      request_id,
+      action,
+      note,
+      acted_by,
+      approval_level,
+      metadata
+    )
+    values ($1, $2, $3, $4, $5, $6::jsonb)
+    `,
+    [
+      requestId,
+      actionName,
+      normalizeString(note),
+      actorUserId,
+      normalizedDecision === "approve" ? nextApprovals : currentApprovals,
+      JSON.stringify({
+        decision: normalizedDecision,
+        fromStatus,
+        toStatus: nextStatus,
+        approvalCount: nextApprovals,
+        requiredApprovals: nextRequiredApprovals,
+      }),
+    ]
+  );
+
+  return {
+    status: nextStatus,
+    approvalCount: nextApprovals,
+    requiredApprovals: nextRequiredApprovals,
+  };
+}
+
 app.get(
   "/api/instructor/sections",
   requireAuth,
@@ -3829,12 +5031,148 @@ app.post(
   }
 );
 
-app.put(
-  "/api/instructor/requests/:id/status",
+app.get(
+  "/api/instructor/workflow/requests",
   requireAuth,
   requireRole(["instructor"]),
   async (req, res) => {
-    const client = await pool.connect();
+    try {
+      await ensureWorkflowSchema();
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const search = normalizeString(req.query.search)?.toLowerCase() || null;
+      const status = normalizeString(req.query.status);
+      const requestType = normalizeString(req.query.request_type);
+      const limit = Math.min(Number(req.query.limit) || 150, 300);
+
+      const conditions = [
+        `r.candidate_id in (
+          select e.candidate_id
+          from academics.enrollments e
+          join academics.course_sections cs on cs.id = e.section_id
+          where cs.instructor_staff_id = $1
+        )`,
+      ];
+      const values = [staffId];
+      let index = 2;
+
+      if (search) {
+        conditions.push(
+          `(lower(r.title) like $${index}
+            or lower(coalesce(r.body, '')) like $${index}
+            or lower(coalesce(c.candidate_no, '')) like $${index}
+            or lower(coalesce(p.first_name, '')) like $${index}
+            or lower(coalesce(p.last_name, '')) like $${index})`
+        );
+        values.push(`%${search}%`);
+        index += 1;
+      }
+
+      if (status) {
+        conditions.push(`r.status = $${index}`);
+        values.push(status);
+        index += 1;
+      }
+
+      if (requestType) {
+        conditions.push(`r.request_type = $${index}`);
+        values.push(requestType);
+        index += 1;
+      }
+
+      const whereClause = `where ${conditions.join(" and ")}`;
+
+      const result = await pool.query(
+        `
+        select
+          r.id,
+          r.request_type,
+          r.title,
+          r.body,
+          r.status,
+          r.priority,
+          r.approval_count,
+          r.required_approvals,
+          r.submitted_at,
+          r.updated_at,
+          c.id as candidate_id,
+          c.candidate_no,
+          p.first_name,
+          p.last_name
+        from core.requests r
+        join core.candidates c on c.id = r.candidate_id
+        join core.people p on p.id = c.person_id
+        ${whereClause}
+        order by r.submitted_at desc
+        limit $${index}
+        `,
+        [...values, limit]
+      );
+
+      return res.json({ rows: result.rows, total: result.rows.length });
+    } catch (error) {
+      console.error("Instructor workflow requests error:", error);
+      return res.status(500).json({ message: "تعذر تحميل طلبات المحاضر." });
+    }
+  }
+);
+
+app.get(
+  "/api/instructor/sections/:id/students",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
+    try {
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const sectionId = req.params.id;
+      const sectionResult = await pool.query(
+        `
+        select id
+        from academics.course_sections
+        where id = $1 and instructor_staff_id = $2
+        `,
+        [sectionId, staffId]
+      );
+      if (sectionResult.rowCount === 0) {
+        return res.status(403).json({ message: "غير مصرح بهذه الشعبة." });
+      }
+
+      const result = await pool.query(
+        `
+        select
+          cand.id as candidate_id,
+          cand.candidate_no,
+          p.first_name,
+          p.last_name
+        from academics.enrollments e
+        join core.candidates cand on cand.id = e.candidate_id
+        join core.people p on p.id = cand.person_id
+        where e.section_id = $1
+        order by cand.candidate_no
+        `,
+        [sectionId]
+      );
+
+      return res.json({ rows: result.rows });
+    } catch (error) {
+      console.error("Instructor section students error:", error);
+      return res.status(500).json({ message: "تعذر تحميل طلاب الشعبة." });
+    }
+  }
+);
+
+app.get(
+  "/api/instructor/workflow/requests/:id/actions",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
     try {
       const staffId = await getInstructorStaffId(req.user.userId);
       if (!staffId) {
@@ -3842,10 +5180,146 @@ app.put(
       }
 
       const requestId = req.params.id;
-      const status = normalizeString(req.body?.status);
+      const ownershipResult = await pool.query(
+        `
+        select r.id
+        from core.requests r
+        where r.id = $1
+          and r.candidate_id in (
+            select e.candidate_id
+            from academics.enrollments e
+            join academics.course_sections cs on cs.id = e.section_id
+            where cs.instructor_staff_id = $2
+          )
+        `,
+        [requestId, staffId]
+      );
+
+      if (ownershipResult.rowCount === 0) {
+        return res.status(404).json({ message: "الطلب غير موجود ضمن نطاق المحاضر." });
+      }
+
+      const result = await pool.query(
+        `
+        select
+          ra.id,
+          ra.action,
+          ra.note,
+          ra.acted_at,
+          ra.approval_level,
+          ra.metadata,
+          u.username as acted_by_username
+        from core.request_actions ra
+        left join auth.users u on u.id = ra.acted_by
+        where ra.request_id = $1
+        order by ra.acted_at desc
+        `,
+        [requestId]
+      );
+
+      return res.json({ rows: result.rows });
+    } catch (error) {
+      console.error("Instructor workflow actions error:", error);
+      return res.status(500).json({ message: "تعذر تحميل سجل الطلب." });
+    }
+  }
+);
+
+async function handleInstructorRequestDecision(req, res) {
+  const client = await pool.connect();
+  try {
+    await ensureWorkflowSchema();
+    const staffId = await getInstructorStaffId(req.user.userId);
+    if (!staffId) {
+      return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+    }
+
+    const requestId = req.params.id;
+    const ownershipResult = await client.query(
+      `
+      select r.id
+      from core.requests r
+      where r.id = $1
+        and r.candidate_id in (
+          select e.candidate_id
+          from academics.enrollments e
+          join academics.course_sections cs on cs.id = e.section_id
+          where cs.instructor_staff_id = $2
+        )
+      `,
+      [requestId, staffId]
+    );
+
+    if (ownershipResult.rowCount === 0) {
+      return res.status(404).json({ message: "الطلب غير موجود ضمن نطاق المحاضر." });
+    }
+
+    await client.query("begin");
+    const statusInput = normalizeString(req.body?.status);
+    const decisionMap = {
+      in_review: "in_review",
+      approved: "approve",
+      rejected: "reject",
+      escalate: "escalate",
+    };
+    const decision = decisionMap[statusInput] || statusInput;
+    const decisionResult = await applyWorkflowDecision(client, {
+      requestId,
+      decision,
+      note: normalizeString(req.body?.note),
+      actorUserId: req.user.userId,
+    });
+    await client.query("commit");
+
+    return res.json({
+      updated: true,
+      status: decisionResult.status,
+      approvalCount: decisionResult.approvalCount,
+      requiredApprovals: decisionResult.requiredApprovals,
+    });
+  } catch (error) {
+    await client.query("rollback");
+    const status = Number(error.status) || 500;
+    console.error("Instructor request status error:", error);
+    return res.status(status).json({
+      message: status === 500 ? "تعذر تحديث حالة الطلب." : error.message,
+    });
+  } finally {
+    client.release();
+  }
+}
+
+app.put(
+  "/api/instructor/workflow/requests/:id/status",
+  requireAuth,
+  requireRole(["instructor"]),
+  handleInstructorRequestDecision
+);
+
+app.put(
+  "/api/instructor/requests/:id/status",
+  requireAuth,
+  requireRole(["instructor"]),
+  handleInstructorRequestDecision
+);
+
+app.post(
+  "/api/instructor/workflow/requests/:id/comment",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureWorkflowSchema();
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const requestId = req.params.id;
       const note = normalizeString(req.body?.note);
-      if (!status) {
-        return res.status(400).json({ message: "يرجى تحديد حالة الطلب." });
+      if (!note) {
+        return res.status(400).json({ message: "يرجى إدخال تعليق." });
       }
 
       const ownershipResult = await client.query(
@@ -3869,28 +5343,23 @@ app.put(
 
       await client.query("begin");
       await client.query(
-        `
-        update core.requests
-        set status = $1
-        where id = $2
-        `,
-        [status, requestId]
+        `update core.requests set updated_at = now() where id = $1`,
+        [requestId]
       );
-
       await client.query(
         `
         insert into core.request_actions (request_id, action, note, acted_by)
-        values ($1, $2, $3, $4)
+        values ($1, 'workflow_comment', $2, $3)
         `,
-        [requestId, `status_${status}`, note, req.user.userId]
+        [requestId, note, req.user.userId]
       );
       await client.query("commit");
 
-      return res.json({ updated: true });
+      return res.status(201).json({ created: true });
     } catch (error) {
       await client.query("rollback");
-      console.error("Instructor request status error:", error);
-      return res.status(500).json({ message: "تعذر تحديث حالة الطلب." });
+      console.error("Instructor workflow comment error:", error);
+      return res.status(500).json({ message: "تعذر حفظ التعليق." });
     } finally {
       client.release();
     }
@@ -3904,9 +5373,19 @@ app.post(
   async (req, res) => {
     const client = await pool.connect();
     try {
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
       const { candidateId, body, topic } = req.body || {};
       if (!candidateId || !normalizeString(body)) {
         return res.status(400).json({ message: "يرجى اختيار الطالب وكتابة الرسالة." });
+      }
+
+      const inScope = await candidateInInstructorScope(client, staffId, String(candidateId));
+      if (!inScope) {
+        return res.status(403).json({ message: "لا يمكنك مراسلة طالب خارج شعبك." });
       }
 
       const candidateUserResult = await client.query(
@@ -3980,11 +5459,285 @@ app.post(
 );
 
 app.get(
+  "/api/instructor/messages/list",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
+    try {
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const candidateId = normalizeString(req.query.candidate_id);
+      const values = [req.user.userId, staffId];
+      let index = 3;
+      let candidateCondition = "";
+
+      if (candidateId) {
+        candidateCondition = `and cand.id = $${index}`;
+        values.push(candidateId);
+      }
+
+      const result = await pool.query(
+        `
+        select
+          m.id,
+          m.body,
+          m.sent_at,
+          conv.id as conversation_id,
+          conv.topic,
+          sender.username as sender_username,
+          cand.id as candidate_id,
+          cand.candidate_no,
+          p.first_name,
+          p.last_name
+        from comms.messages m
+        join comms.conversations conv on conv.id = m.conversation_id
+        join comms.conversation_participants cp_instructor
+          on cp_instructor.conversation_id = conv.id
+          and cp_instructor.user_id = $1
+        join comms.conversation_participants cp_candidate
+          on cp_candidate.conversation_id = conv.id
+          and cp_candidate.user_id <> $1
+        join core.candidates cand on cand.user_id = cp_candidate.user_id
+        join core.people p on p.id = cand.person_id
+        left join auth.users sender on sender.id = m.sender_user_id
+        where cand.id in (
+          select distinct e.candidate_id
+          from academics.enrollments e
+          join academics.course_sections cs on cs.id = e.section_id
+          where cs.instructor_staff_id = $2
+        )
+        ${candidateCondition}
+        order by m.sent_at desc
+        limit 200
+        `,
+        values
+      );
+
+      return res.json({ rows: result.rows });
+    } catch (error) {
+      console.error("Instructor messages list error:", error);
+      return res.status(500).json({ message: "تعذر تحميل سجل الرسائل." });
+    }
+  }
+);
+
+app.get(
+  "/api/instructor/attendance/summary",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
+    try {
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const sectionId = normalizeString(req.query.section_id);
+      const fromDate = normalizeString(req.query.from);
+      const toDate = normalizeString(req.query.to);
+
+      const conditions = [`cs.instructor_staff_id = $1`];
+      const values = [staffId];
+      let index = 2;
+      if (sectionId) {
+        conditions.push(`cs.id = $${index}`);
+        values.push(sectionId);
+        index += 1;
+      }
+      if (fromDate) {
+        conditions.push(`s.session_at::date >= $${index}`);
+        values.push(fromDate);
+        index += 1;
+      }
+      if (toDate) {
+        conditions.push(`s.session_at::date <= $${index}`);
+        values.push(toDate);
+        index += 1;
+      }
+      const whereClause = `where ${conditions.join(" and ")}`;
+
+      const [summaryResult, sectionsResult, rosterResult] = await Promise.all([
+        pool.query(
+          `
+          select
+            count(*)::int as total_sessions,
+            sum(case when a.present then 1 else 0 end)::int as present_sessions,
+            sum(case when a.present = false then 1 else 0 end)::int as absent_sessions
+          from academics.attendance a
+          join academics.attendance_sessions s on s.id = a.attendance_session_id
+          join academics.course_sections cs on cs.id = s.section_id
+          ${whereClause}
+          `,
+          values
+        ),
+        pool.query(
+          `
+          select
+            cs.id,
+            c.code as course_code,
+            c.title as course_title,
+            cs.section_code,
+            t.name as term_name
+          from academics.course_sections cs
+          join academics.courses c on c.id = cs.course_id
+          join academics.terms t on t.id = cs.term_id
+          where cs.instructor_staff_id = $1
+          order by t.start_date desc, c.code
+          `,
+          [staffId]
+        ),
+        pool.query(
+          `
+          select
+            cand.id as candidate_id,
+            cand.candidate_no,
+            p.first_name,
+            p.last_name,
+            sum(case when a.present then 1 else 0 end)::int as present_sessions,
+            sum(case when a.present = false then 1 else 0 end)::int as absent_sessions,
+            count(a.id)::int as total_sessions,
+            round(
+              (sum(case when a.present then 1 else 0 end)::numeric / nullif(count(a.id), 0)) * 100,
+              2
+            ) as attendance_rate
+          from academics.attendance a
+          join academics.attendance_sessions s on s.id = a.attendance_session_id
+          join academics.course_sections cs on cs.id = s.section_id
+          join core.candidates cand on cand.id = a.candidate_id
+          join core.people p on p.id = cand.person_id
+          ${whereClause}
+          group by cand.id, cand.candidate_no, p.first_name, p.last_name
+          order by attendance_rate asc nulls last, cand.candidate_no
+          limit 120
+          `,
+          values
+        ),
+      ]);
+
+      const summary = summaryResult.rows[0] || {
+        total_sessions: 0,
+        present_sessions: 0,
+        absent_sessions: 0,
+      };
+      return res.json({
+        summary: {
+          total: Number(summary.total_sessions || 0),
+          present: Number(summary.present_sessions || 0),
+          absent: Number(summary.absent_sessions || 0),
+        },
+        sections: sectionsResult.rows,
+        roster: rosterResult.rows,
+      });
+    } catch (error) {
+      console.error("Instructor attendance summary error:", error);
+      return res.status(500).json({ message: "تعذر تحميل ملخص الحضور." });
+    }
+  }
+);
+
+app.post(
+  "/api/instructor/attendance/records",
+  requireAuth,
+  requireRole(["instructor"]),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const staffId = await getInstructorStaffId(req.user.userId);
+      if (!staffId) {
+        return res.status(404).json({ message: "لا يوجد ملف محاضر مرتبط بالحساب." });
+      }
+
+      const sectionId = normalizeString(req.body?.sectionId);
+      const sessionAt = parseDateTime(req.body?.sessionAt) || new Date().toISOString();
+      const topic = normalizeString(req.body?.topic);
+      const records = Array.isArray(req.body?.records) ? req.body.records : [];
+      if (!sectionId || records.length === 0) {
+        return res.status(400).json({ message: "بيانات الحضور غير مكتملة." });
+      }
+
+      const sectionResult = await client.query(
+        `
+        select id
+        from academics.course_sections
+        where id = $1 and instructor_staff_id = $2
+        `,
+        [sectionId, staffId]
+      );
+      if (sectionResult.rowCount === 0) {
+        return res.status(403).json({ message: "لا يمكنك تسجيل حضور لهذه الشعبة." });
+      }
+
+      await client.query("begin");
+      const sessionResult = await client.query(
+        `
+        insert into academics.attendance_sessions (section_id, session_at, topic)
+        values ($1, $2, $3)
+        returning id
+        `,
+        [sectionId, sessionAt, topic]
+      );
+      const attendanceSessionId = sessionResult.rows[0].id;
+
+      let updated = 0;
+      for (const row of records) {
+        const candidateId = normalizeString(row?.candidateId);
+        if (!candidateId) continue;
+        const inScope = await client.query(
+          `
+          select 1
+          from academics.enrollments
+          where section_id = $1 and candidate_id = $2
+          `,
+          [sectionId, candidateId]
+        );
+        if (inScope.rowCount === 0) continue;
+
+        await client.query(
+          `
+          insert into academics.attendance (
+            attendance_session_id,
+            candidate_id,
+            present,
+            note
+          )
+          values ($1, $2, $3, $4)
+          on conflict (attendance_session_id, candidate_id)
+          do update set
+            present = excluded.present,
+            note = excluded.note
+          `,
+          [
+            attendanceSessionId,
+            candidateId,
+            parseBoolean(row?.present) !== false,
+            normalizeString(row?.note),
+          ]
+        );
+        updated += 1;
+      }
+
+      await client.query("commit");
+      return res.json({ updated, attendanceSessionId });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Instructor attendance save error:", error);
+      return res.status(500).json({ message: "تعذر حفظ الحضور." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.get(
   "/api/instructor/overview",
   requireAuth,
   requireRole(["instructor"]),
   async (req, res) => {
     try {
+      await ensureWorkflowSchema();
       const userId = req.user.userId;
 
       const staffResult = await pool.query(
@@ -4093,6 +5846,9 @@ app.get(
               r.request_type,
               r.title,
               r.status,
+              r.priority,
+              r.approval_count,
+              r.required_approvals,
               r.submitted_at,
               p.first_name,
               p.last_name
@@ -4546,9 +6302,12 @@ app.get("/api/portal/overview", requireAuth, async (req, res) => {
 });
 
 app.post("/api/requests", requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
+    await ensureWorkflowSchema();
     const userId = req.user.userId;
-    const { requestType, title, body } = req.body || {};
+    const { requestType, title, body, priority } = req.body || {};
+    const parsedPriority = normalizePriority(priority || "normal");
 
     if (!requestType || !title) {
       return res.status(400).json({
@@ -4556,7 +6315,11 @@ app.post("/api/requests", requireAuth, async (req, res) => {
       });
     }
 
-    const candidateResult = await pool.query(
+    if (!parsedPriority) {
+      return res.status(400).json({ message: "قيمة الأولوية غير صالحة." });
+    }
+
+    const candidateResult = await client.query(
       `
       select id
       from core.candidates
@@ -4573,16 +6336,42 @@ app.post("/api/requests", requireAuth, async (req, res) => {
 
     const candidateId = candidateResult.rows[0].id;
 
-    const insertResult = await pool.query(
+    await client.query("begin");
+    const insertResult = await client.query(
       `
-      insert into core.requests (candidate_id, request_type, title, body, created_by)
-      values ($1, $2, $3, $4, $5)
-      returning id, request_type, title, body, status, submitted_at
+      insert into core.requests (
+        candidate_id,
+        request_type,
+        title,
+        body,
+        priority,
+        required_approvals,
+        approval_count,
+        created_by
+      )
+      values ($1, $2, $3, $4, $5, 2, 0, $6)
+      returning id, request_type, title, body, status, priority, submitted_at
       `,
-      [candidateId, requestType, title, body || null, userId]
+      [candidateId, requestType, title, body || null, parsedPriority, userId]
     );
 
     const request = insertResult.rows[0];
+    await client.query(
+      `
+      insert into core.request_actions (request_id, action, note, acted_by, approval_level, metadata)
+      values ($1, 'workflow_submitted', $2, $3, 0, $4::jsonb)
+      `,
+      [
+        request.id,
+        "تم إنشاء الطلب من بوابة المرشح.",
+        userId,
+        JSON.stringify({
+          status: request.status,
+          priority: request.priority,
+        }),
+      ]
+    );
+    await client.query("commit");
 
     return res.status(201).json({
       request: {
@@ -4591,12 +6380,16 @@ app.post("/api/requests", requireAuth, async (req, res) => {
         title: request.title,
         body: request.body,
         status: request.status,
+        priority: request.priority,
         submittedAt: request.submitted_at,
       },
     });
   } catch (error) {
+    await client.query("rollback");
     console.error("Create request error:", error);
     return res.status(500).json({ message: "تعذر حفظ الطلب." });
+  } finally {
+    client.release();
   }
 });
 

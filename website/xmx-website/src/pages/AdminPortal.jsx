@@ -9,6 +9,7 @@ const STORAGE_ROLES_KEY = "xmx_portal_roles";
 const NAV_ITEMS = [
   { key: "dashboard", label: "لوحة القيادة" },
   { key: "candidates", label: "إدارة المرشحين" },
+  { key: "workflow", label: "سير الإجراءات" },
   { key: "cohorts", label: "إدارة الدورات والفصائل" },
   { key: "academics", label: "الدرجات الأكاديمية" },
   { key: "medical", label: "الملف الطبي" },
@@ -116,7 +117,14 @@ export default function AdminPortal() {
 
   const [filters, setFilters] = useState({ cohorts: [], platoons: [], statuses: [] });
   const [overview, setOverview] = useState(null);
-  const [leadership, setLeadership] = useState({ summary: null, topAbsences: [], loading: false, error: "" });
+  const [leadership, setLeadership] = useState({
+    summary: null,
+    topAbsences: [],
+    alerts: [],
+    weekly: null,
+    loading: false,
+    error: "",
+  });
   const [leadershipFilters, setLeadershipFilters] = useState({ cohortId: "", from: "", to: "" });
 
   const [candidateFilters, setCandidateFilters] = useState({ search: "", cohortId: "", platoonId: "", status: "" });
@@ -187,6 +195,43 @@ export default function AdminPortal() {
   const [reports, setReports] = useState({ summary: null, advanced: null, saved: [], loading: false, error: "", message: "" });
   const [saveReportForm, setSaveReportForm] = useState({ name: "", description: "", reportType: "executive" });
 
+  const [workflowFilters, setWorkflowFilters] = useState({
+    search: "",
+    status: "",
+    requestType: "",
+    priority: "",
+    cohortId: "",
+    platoonId: "",
+    assignedTo: "",
+  });
+  const [workflowOptions, setWorkflowOptions] = useState({
+    statuses: [],
+    priorities: [],
+    requestTypes: [],
+    assignees: [],
+  });
+  const [workflow, setWorkflow] = useState({
+    rows: [],
+    total: 0,
+    selectedRequestId: "",
+    actions: [],
+    loading: false,
+    error: "",
+    message: "",
+  });
+  const [workflowDecisionForm, setWorkflowDecisionForm] = useState({
+    decision: "in_review",
+    requiredApprovals: "",
+    note: "",
+  });
+  const [workflowAssignForm, setWorkflowAssignForm] = useState({
+    assignedTo: "",
+    priority: "normal",
+    dueAt: "",
+    note: "",
+  });
+  const [workflowComment, setWorkflowComment] = useState("");
+
   const [security, setSecurity] = useState({
     roles: [],
     permissions: [],
@@ -250,6 +295,8 @@ export default function AdminPortal() {
       setLeadership({
         summary: payload.summary || null,
         topAbsences: payload.topAbsences || [],
+        alerts: payload.alerts || [],
+        weekly: payload.weekly || null,
         loading: false,
         error: "",
       });
@@ -457,6 +504,67 @@ export default function AdminPortal() {
     }
   }
 
+  async function loadWorkflowFilters() {
+    const payload = await apiRequest("/admin/workflow/filters", { token });
+    setWorkflowOptions({
+      statuses: payload.statuses || [],
+      priorities: payload.priorities || [],
+      requestTypes: payload.requestTypes || [],
+      assignees: payload.assignees || [],
+    });
+  }
+
+  async function loadWorkflow(customFilters = null) {
+    const source = customFilters || workflowFilters;
+    setWorkflow((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      const query = buildQuery({
+        search: source.search || undefined,
+        status: source.status || undefined,
+        request_type: source.requestType || undefined,
+        priority: source.priority || undefined,
+        cohort_id: source.cohortId || undefined,
+        platoon_id: source.platoonId || undefined,
+        assigned_to: source.assignedTo || undefined,
+        limit: 200,
+      });
+      const payload = await apiRequest(`/admin/workflow/requests${query ? `?${query}` : ""}`, {
+        token,
+      });
+      setWorkflow((prev) => {
+        const rows = payload.rows || [];
+        const selectedRequestId =
+          (prev.selectedRequestId && rows.some((row) => row.id === prev.selectedRequestId)
+            ? prev.selectedRequestId
+            : rows[0]?.id) || "";
+        return {
+          ...prev,
+          rows,
+          total: Number(payload.total || 0),
+          selectedRequestId,
+          loading: false,
+          error: "",
+          message: prev.message,
+        };
+      });
+    } catch (error) {
+      setWorkflow((prev) => ({ ...prev, loading: false, error: error.message }));
+    }
+  }
+
+  async function loadWorkflowActions(requestId) {
+    if (!requestId) {
+      setWorkflow((prev) => ({ ...prev, actions: [] }));
+      return;
+    }
+    try {
+      const payload = await apiRequest(`/admin/workflow/requests/${requestId}/actions`, { token });
+      setWorkflow((prev) => ({ ...prev, actions: payload.rows || [] }));
+    } catch (error) {
+      setWorkflow((prev) => ({ ...prev, error: error.message, actions: [] }));
+    }
+  }
+
   async function loadSecurity() {
     setSecurity((prev) => ({ ...prev, loading: true, error: "", message: "" }));
     try {
@@ -499,6 +607,8 @@ export default function AdminPortal() {
           loadMedicalFilters(),
           loadMedical(),
           loadReports(),
+          loadWorkflowFilters(),
+          loadWorkflow(),
         ]);
         setBoot({ loading: false, error: "" });
       } catch (error) {
@@ -549,11 +659,34 @@ export default function AdminPortal() {
     setSecurity((prev) => ({ ...prev, rankDraft: draft }));
   }, [security.selectedRankId, security.rankPolicies]);
 
+  useEffect(() => {
+    if (!workflow.selectedRequestId || !token) {
+      setWorkflow((prev) => ({ ...prev, actions: [] }));
+      return;
+    }
+    loadWorkflowActions(workflow.selectedRequestId).catch((error) => {
+      setWorkflow((prev) => ({ ...prev, error: error.message }));
+    });
+  }, [workflow.selectedRequestId, token]);
+
+  useEffect(() => {
+    const selected = workflow.rows.find((row) => row.id === workflow.selectedRequestId);
+    if (!selected) return;
+    setWorkflowAssignForm((prev) => ({
+      ...prev,
+      assignedTo: selected.assigned_to || "",
+      priority: selected.priority || "normal",
+      dueAt: selected.due_at ? new Date(selected.due_at).toISOString().slice(0, 16) : "",
+    }));
+  }, [workflow.rows, workflow.selectedRequestId]);
+
   const candidatePlatoons = getPlatoonsByCohort(candidateFilters.cohortId);
   const candidateFormPlatoons = getPlatoonsByCohort(candidateForm.cohortId);
   const attendancePlatoons = getPlatoonsByCohort(attendanceFilters.cohortId);
   const medicalPlatoons = getPlatoonsByCohort(medicalFilters.cohortId);
   const reportPlatoons = getPlatoonsByCohort(reportFilters.cohortId);
+  const workflowPlatoons = getPlatoonsByCohort(workflowFilters.cohortId);
+  const selectedWorkflowRequest = workflow.rows.find((row) => row.id === workflow.selectedRequestId) || null;
 
   function toggleValue(value, values) {
     return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
@@ -867,7 +1000,7 @@ export default function AdminPortal() {
     }
   }
 
-  async function exportReport(type) {
+  async function exportReport(type, format = "csv") {
     try {
       const query = buildQuery({
         cohort_id: reportFilters.cohortId || undefined,
@@ -877,17 +1010,80 @@ export default function AdminPortal() {
         term_id: reportFilters.termId || undefined,
         course_id: reportFilters.courseId || undefined,
       });
-      const blob = await apiRequest(`/admin/reports/${type}.csv?${query}`, { token, isBlob: true });
+      const blob = await apiRequest(`/admin/reports/${type}.${format}?${query}`, { token, isBlob: true });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `${type}_report.csv`;
+      link.download = `${type}_report.${format}`;
       document.body.append(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
       setReports((prev) => ({ ...prev, error: error.message }));
+    }
+  }
+
+  async function saveWorkflowDecision(event) {
+    event.preventDefault();
+    if (!workflow.selectedRequestId) return;
+    setWorkflow((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      await apiRequest(`/admin/workflow/requests/${workflow.selectedRequestId}/decision`, {
+        method: "PUT",
+        token,
+        body: {
+          decision: workflowDecisionForm.decision,
+          note: workflowDecisionForm.note || undefined,
+          requiredApprovals: workflowDecisionForm.requiredApprovals || undefined,
+        },
+      });
+      setWorkflowDecisionForm((prev) => ({ ...prev, note: "" }));
+      setWorkflow((prev) => ({ ...prev, loading: false, message: "تم تنفيذ القرار بنجاح." }));
+      await Promise.all([loadWorkflow(), loadWorkflowActions(workflow.selectedRequestId), loadOverview(), loadLeadership()]);
+    } catch (error) {
+      setWorkflow((prev) => ({ ...prev, loading: false, error: error.message }));
+    }
+  }
+
+  async function saveWorkflowAssignment(event) {
+    event.preventDefault();
+    if (!workflow.selectedRequestId) return;
+    setWorkflow((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      await apiRequest(`/admin/workflow/requests/${workflow.selectedRequestId}/assign`, {
+        method: "PUT",
+        token,
+        body: {
+          assignedTo: workflowAssignForm.assignedTo || null,
+          priority: workflowAssignForm.priority,
+          dueAt: workflowAssignForm.dueAt || null,
+          note: workflowAssignForm.note || null,
+        },
+      });
+      setWorkflowAssignForm((prev) => ({ ...prev, note: "" }));
+      setWorkflow((prev) => ({ ...prev, loading: false, message: "تم تحديث التعيين." }));
+      await Promise.all([loadWorkflow(), loadWorkflowActions(workflow.selectedRequestId)]);
+    } catch (error) {
+      setWorkflow((prev) => ({ ...prev, loading: false, error: error.message }));
+    }
+  }
+
+  async function saveWorkflowComment(event) {
+    event.preventDefault();
+    if (!workflow.selectedRequestId || !workflowComment.trim()) return;
+    setWorkflow((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      await apiRequest(`/admin/workflow/requests/${workflow.selectedRequestId}/comment`, {
+        method: "POST",
+        token,
+        body: { note: workflowComment },
+      });
+      setWorkflowComment("");
+      setWorkflow((prev) => ({ ...prev, loading: false, message: "تم حفظ التعليق." }));
+      await loadWorkflowActions(workflow.selectedRequestId);
+    } catch (error) {
+      setWorkflow((prev) => ({ ...prev, loading: false, error: error.message }));
     }
   }
 
@@ -1038,6 +1234,27 @@ export default function AdminPortal() {
                 <div className="info-row" key={`abs-${item.candidate_id}`}>
                   <span>{item.first_name} {item.last_name}</span>
                   <strong>{formatNumber(item.absent_sessions)} غياب</strong>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="admin-metrics">
+          <div className="metric-card"><span>حضور آخر 7 أيام</span><h3>{formatNumber(leadership.weekly?.attendanceRate)}%</h3></div>
+          <div className="metric-card"><span>متوسط الدرجات الأسبوعي</span><h3>{formatNumber(leadership.weekly?.averageGrade)}</h3></div>
+          <div className="metric-card"><span>طلبات جديدة أسبوعياً</span><h3>{formatNumber(leadership.weekly?.newRequests)}</h3></div>
+          <div className="metric-card"><span>حالات طبية حرجة أسبوعياً</span><h3>{formatNumber(leadership.weekly?.criticalMedical)}</h3></div>
+        </div>
+        <div className="info-card">
+          <h3>التنبيهات التلقائية</h3>
+          <div className="info-list">
+            {(leadership.alerts || []).length === 0 ? (
+              <p className="empty">لا توجد تنبيهات حرجة حالياً.</p>
+            ) : (
+              leadership.alerts.map((alertItem, index) => (
+                <div className="info-row" key={`${alertItem.type}-${index}`}>
+                  <span>{alertItem.title}</span>
+                  <strong>{alertItem.description}</strong>
                 </div>
               ))
             )}
@@ -1237,6 +1454,249 @@ export default function AdminPortal() {
       </section>
     );
   }
+
+  if (activeTab === "workflow") {
+    activeContent = (
+      <section className="admin-section">
+        <div className="admin-section-header">
+          <div>
+            <h2>محرك سير الإجراءات</h2>
+            <p>اعتماد متعدد المستويات مع سجل قرارات إلزامي.</p>
+          </div>
+          <div className="admin-section-summary">إجمالي الطلبات: {formatNumber(workflow.total)}</div>
+        </div>
+        <div className="admin-filters">
+          <input
+            className="admin-input"
+            placeholder="بحث بالعنوان أو اسم المرشح"
+            value={workflowFilters.search}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, search: event.target.value }))}
+          />
+          <select
+            className="admin-select"
+            value={workflowFilters.status}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, status: event.target.value }))}
+          >
+            <option value="">كل الحالات</option>
+            {workflowOptions.statuses.map((statusValue) => (
+              <option key={`w-status-${statusValue}`} value={statusValue}>{statusValue}</option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={workflowFilters.requestType}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, requestType: event.target.value }))}
+          >
+            <option value="">كل أنواع الطلبات</option>
+            {workflowOptions.requestTypes.map((typeValue) => (
+              <option key={`w-type-${typeValue}`} value={typeValue}>{typeValue}</option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={workflowFilters.priority}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, priority: event.target.value }))}
+          >
+            <option value="">كل الأولويات</option>
+            {workflowOptions.priorities.map((priorityValue) => (
+              <option key={`w-priority-${priorityValue}`} value={priorityValue}>{priorityValue}</option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={workflowFilters.cohortId}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, cohortId: event.target.value, platoonId: "" }))}
+          >
+            <option value="">كل الدورات</option>
+            {filters.cohorts.map((cohort) => (
+              <option key={`w-cohort-${cohort.id}`} value={cohort.id}>{cohort.cohort_no}</option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={workflowFilters.platoonId}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, platoonId: event.target.value }))}
+          >
+            <option value="">كل الفصائل</option>
+            {workflowPlatoons.map((platoon) => (
+              <option key={`w-platoon-${platoon.id}`} value={platoon.id}>فصيل {platoon.platoon_no}</option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={workflowFilters.assignedTo}
+            onChange={(event) => setWorkflowFilters((prev) => ({ ...prev, assignedTo: event.target.value }))}
+          >
+            <option value="">كل المكلّفين</option>
+            {workflowOptions.assignees.map((assignee) => (
+              <option key={`w-assignee-${assignee.id}`} value={assignee.id}>{assignee.username}</option>
+            ))}
+          </select>
+          <button className="admin-button" onClick={() => loadWorkflow()} disabled={workflow.loading}>
+            {workflow.loading ? "..." : "تحديث"}
+          </button>
+        </div>
+
+        {workflow.error ? <div className="admin-state error">{workflow.error}</div> : null}
+        {workflow.message ? <div className="admin-state">{workflow.message}</div> : null}
+
+        <div className="admin-table">
+          <table>
+            <thead>
+              <tr>
+                <th>الطلب</th>
+                <th>المرشح</th>
+                <th>الحالة</th>
+                <th>الأولوية</th>
+                <th>الموافقات</th>
+                <th>الاستحقاق</th>
+                <th>المكلّف</th>
+              </tr>
+            </thead>
+            <tbody>
+              {workflow.rows.length === 0 ? (
+                <tr><td colSpan={7} className="empty">لا توجد طلبات مطابقة.</td></tr>
+              ) : (
+                workflow.rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <button
+                        className="admin-button secondary"
+                        onClick={() => setWorkflow((prev) => ({ ...prev, selectedRequestId: row.id, message: "" }))}
+                      >
+                        {row.title}
+                      </button>
+                    </td>
+                    <td>{row.candidate_no} - {row.first_name} {row.last_name}</td>
+                    <td>{row.status}</td>
+                    <td>{row.priority}</td>
+                    <td>{formatNumber(row.approval_count)} / {formatNumber(row.required_approvals)}</td>
+                    <td>{formatDateTime(row.due_at)}</td>
+                    <td>{row.assigned_username || "-"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="admin-grid admin-two-columns">
+          <div className="admin-card">
+            <h3>القرار</h3>
+            {selectedWorkflowRequest ? (
+              <div className="admin-filter-row">
+                <strong>{selectedWorkflowRequest.title}</strong>
+                <span>{selectedWorkflowRequest.request_type} - {selectedWorkflowRequest.status}</span>
+                <span>{selectedWorkflowRequest.candidate_no} - {selectedWorkflowRequest.first_name} {selectedWorkflowRequest.last_name}</span>
+              </div>
+            ) : (
+              <p className="empty">اختر طلباً من الجدول.</p>
+            )}
+            <form className="admin-form" onSubmit={saveWorkflowDecision}>
+              <select
+                className="admin-select"
+                value={workflowDecisionForm.decision}
+                onChange={(event) => setWorkflowDecisionForm((prev) => ({ ...prev, decision: event.target.value }))}
+              >
+                <option value="in_review">إعادة للمراجعة</option>
+                <option value="approve">موافقة</option>
+                <option value="reject">رفض</option>
+                <option value="escalate">تصعيد</option>
+              </select>
+              <input
+                className="admin-input"
+                type="number"
+                min="1"
+                placeholder="عدد الموافقات المطلوبة (اختياري)"
+                value={workflowDecisionForm.requiredApprovals}
+                onChange={(event) => setWorkflowDecisionForm((prev) => ({ ...prev, requiredApprovals: event.target.value }))}
+              />
+              <input
+                className="admin-input"
+                placeholder="ملاحظة القرار"
+                value={workflowDecisionForm.note}
+                onChange={(event) => setWorkflowDecisionForm((prev) => ({ ...prev, note: event.target.value }))}
+              />
+              <button className="admin-button" type="submit" disabled={!workflow.selectedRequestId || workflow.loading}>
+                تنفيذ القرار
+              </button>
+            </form>
+          </div>
+
+          <div className="admin-card">
+            <h3>التعيين والتعليقات</h3>
+            <form className="admin-form" onSubmit={saveWorkflowAssignment}>
+              <select
+                className="admin-select"
+                value={workflowAssignForm.assignedTo}
+                onChange={(event) => setWorkflowAssignForm((prev) => ({ ...prev, assignedTo: event.target.value }))}
+              >
+                <option value="">بدون مكلّف</option>
+                {workflowOptions.assignees.map((assignee) => (
+                  <option key={`assign-${assignee.id}`} value={assignee.id}>{assignee.username}</option>
+                ))}
+              </select>
+              <select
+                className="admin-select"
+                value={workflowAssignForm.priority}
+                onChange={(event) => setWorkflowAssignForm((prev) => ({ ...prev, priority: event.target.value }))}
+              >
+                {workflowOptions.priorities.map((priorityValue) => (
+                  <option key={`assign-priority-${priorityValue}`} value={priorityValue}>{priorityValue}</option>
+                ))}
+              </select>
+              <input
+                className="admin-input"
+                type="datetime-local"
+                value={workflowAssignForm.dueAt}
+                onChange={(event) => setWorkflowAssignForm((prev) => ({ ...prev, dueAt: event.target.value }))}
+              />
+              <input
+                className="admin-input"
+                placeholder="ملاحظة التعيين"
+                value={workflowAssignForm.note}
+                onChange={(event) => setWorkflowAssignForm((prev) => ({ ...prev, note: event.target.value }))}
+              />
+              <button className="admin-button" type="submit" disabled={!workflow.selectedRequestId || workflow.loading}>
+                حفظ التعيين
+              </button>
+            </form>
+            <form className="admin-form" onSubmit={saveWorkflowComment}>
+              <input
+                className="admin-input"
+                placeholder="تعليق إضافي"
+                value={workflowComment}
+                onChange={(event) => setWorkflowComment(event.target.value)}
+              />
+              <button className="admin-button secondary" type="submit" disabled={!workflow.selectedRequestId || workflow.loading}>
+                إضافة تعليق
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <div className="admin-card">
+          <h3>سجل القرارات</h3>
+          <div className="info-list">
+            {workflow.actions.length === 0 ? (
+              <p className="empty">لا يوجد سجل إجراءات.</p>
+            ) : (
+              workflow.actions.map((action) => (
+                <div className="info-row" key={action.id}>
+                  <span>{action.action}</span>
+                  <strong>
+                    {action.acted_by_username || "-"} - {formatDateTime(action.acted_at)}
+                    {action.note ? ` - ${action.note}` : ""}
+                  </strong>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   if (activeTab === "cohorts") {
     activeContent = (
       <section className="admin-section">
@@ -1656,9 +2116,12 @@ export default function AdminPortal() {
         </div>
 
         <div className="report-actions">
-          <button className="admin-button secondary" onClick={() => exportReport("candidates")}>تصدير المرشحين</button>
-          <button className="admin-button secondary" onClick={() => exportReport("attendance")}>تصدير الحضور</button>
-          <button className="admin-button secondary" onClick={() => exportReport("grades")}>تصدير الدرجات</button>
+          <button className="admin-button secondary" onClick={() => exportReport("candidates", "csv")}>تصدير المرشحين CSV</button>
+          <button className="admin-button secondary" onClick={() => exportReport("attendance", "csv")}>تصدير الحضور CSV</button>
+          <button className="admin-button secondary" onClick={() => exportReport("grades", "csv")}>تصدير الدرجات CSV</button>
+          <button className="admin-button secondary" onClick={() => exportReport("candidates", "pdf")}>تصدير المرشحين PDF</button>
+          <button className="admin-button secondary" onClick={() => exportReport("attendance", "pdf")}>تصدير الحضور PDF</button>
+          <button className="admin-button secondary" onClick={() => exportReport("grades", "pdf")}>تصدير الدرجات PDF</button>
         </div>
 
         <div className="admin-grid admin-two-columns">
@@ -1871,6 +2334,16 @@ export default function AdminPortal() {
                   setActiveTab(item.key);
                   if (item.key === "security" && security.roles.length === 0) {
                     loadSecurity();
+                  }
+                  if (item.key === "workflow" && workflowOptions.statuses.length === 0) {
+                    loadWorkflowFilters().catch((error) =>
+                      setWorkflow((prev) => ({ ...prev, error: error.message }))
+                    );
+                  }
+                  if (item.key === "workflow" && workflow.rows.length === 0) {
+                    loadWorkflow().catch((error) =>
+                      setWorkflow((prev) => ({ ...prev, error: error.message }))
+                    );
                   }
                 }}
               >

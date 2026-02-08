@@ -88,3 +88,51 @@ CREATE TABLE IF NOT EXISTS core.rank_role_policies (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rank_role_policies_role ON core.rank_role_policies(role_id);
+
+-- Workflow fields for candidate requests
+ALTER TABLE core.requests
+  ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'normal',
+  ADD COLUMN IF NOT EXISTS assigned_to uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS due_at timestamptz,
+  ADD COLUMN IF NOT EXISTS required_approvals int NOT NULL DEFAULT 2,
+  ADD COLUMN IF NOT EXISTS approval_count int NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS closed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS last_decision_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_decision_by uuid REFERENCES auth.users(id) ON DELETE SET NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'chk_requests_priority'
+  ) THEN
+    ALTER TABLE core.requests
+      ADD CONSTRAINT chk_requests_priority
+      CHECK (priority IN ('low', 'normal', 'high', 'critical'));
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'chk_requests_approvals'
+  ) THEN
+    ALTER TABLE core.requests
+      ADD CONSTRAINT chk_requests_approvals
+      CHECK (
+        required_approvals >= 1
+        AND approval_count >= 0
+        AND approval_count <= required_approvals
+      );
+  END IF;
+END $$;
+
+ALTER TABLE core.request_actions
+  ADD COLUMN IF NOT EXISTS approval_level int,
+  ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_requests_assigned_to ON core.requests(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_requests_priority ON core.requests(priority);
+CREATE INDEX IF NOT EXISTS idx_requests_due_at ON core.requests(due_at);
+CREATE INDEX IF NOT EXISTS idx_request_actions_approval_level ON core.request_actions(approval_level);

@@ -29,7 +29,7 @@ export default function App() {
         <Route
           path="/admin-portal"
           element={
-            <RequireRole allowedRoles={["admin"]}>
+            <RequireRole allowedRoles={["admin", "media_writer", "media_reviewer", "media_publisher"]}>
               <AdminPortal />
             </RequireRole>
           }
@@ -45,7 +45,9 @@ export default function App() {
         <Route
           path="/upload-portal"
           element={
-            <RequireRole allowedRoles={["uploader", "admin"]}>
+            <RequireRole
+              allowedRoles={["uploader", "admin", "media_writer", "media_reviewer", "media_publisher"]}
+            >
               <UploadPortal />
             </RequireRole>
           }

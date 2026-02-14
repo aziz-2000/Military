@@ -7,14 +7,87 @@ INSERT INTO auth.roles (name, description) VALUES
 ('admin', 'System administrator'),
 ('candidate', 'College candidate'),
 ('instructor', 'Academic instructor'),
-('uploader', 'Data upload staff')
+('uploader', 'Data upload staff'),
+('media_writer', 'Media content writer'),
+('media_reviewer', 'Media content reviewer'),
+('media_publisher', 'Media content publisher')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.permissions (code, description) VALUES
+('media.categories.read', 'Read media categories'),
+('media.categories.write', 'Manage media categories'),
+('media.posts.read', 'Read media posts'),
+('media.posts.write', 'Create and update media posts'),
+('media.posts.review', 'Review and approve/reject media posts'),
+('media.posts.publish', 'Publish/archive/pin media posts'),
+('media.files.read', 'Read uploaded media files'),
+('media.dashboard.read', 'Read media dashboard')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM auth.roles r
+JOIN auth.permissions p ON p.code IN (
+  'media.categories.read',
+  'media.categories.write',
+  'media.posts.read',
+  'media.posts.write',
+  'media.posts.review',
+  'media.posts.publish',
+  'media.files.read',
+  'media.dashboard.read'
+)
+WHERE r.name = 'admin'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM auth.roles r
+JOIN auth.permissions p ON p.code IN (
+  'media.categories.read',
+  'media.posts.read',
+  'media.posts.write',
+  'media.files.read',
+  'media.dashboard.read'
+)
+WHERE r.name = 'media_writer'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM auth.roles r
+JOIN auth.permissions p ON p.code IN (
+  'media.categories.read',
+  'media.posts.read',
+  'media.posts.review',
+  'media.files.read',
+  'media.dashboard.read'
+)
+WHERE r.name = 'media_reviewer'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM auth.roles r
+JOIN auth.permissions p ON p.code IN (
+  'media.categories.read',
+  'media.categories.write',
+  'media.posts.read',
+  'media.posts.publish',
+  'media.files.read',
+  'media.dashboard.read'
+)
+WHERE r.name = 'media_publisher'
 ON CONFLICT DO NOTHING;
 
 -- Admin + uploader accounts
 INSERT INTO auth.users (username, email, password_hash)
 VALUES
 ('admin1', 'admin@college.test', crypt('admin123', gen_salt('bf'))),
-('uploader1', 'uploader@college.test', crypt('upload123', gen_salt('bf')))
+('uploader1', 'uploader@college.test', crypt('upload123', gen_salt('bf'))),
+('media_writer1', 'media_writer@college.test', crypt('writer123', gen_salt('bf'))),
+('media_reviewer1', 'media_reviewer@college.test', crypt('review123', gen_salt('bf'))),
+('media_publisher1', 'media_publisher@college.test', crypt('publish123', gen_salt('bf')))
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO auth.user_roles (user_id, role_id)
@@ -29,6 +102,27 @@ SELECT u.id, r.id
 FROM auth.users u
 JOIN auth.roles r ON r.name = 'uploader'
 WHERE u.username = 'uploader1'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM auth.users u
+JOIN auth.roles r ON r.name = 'media_writer'
+WHERE u.username = 'media_writer1'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM auth.users u
+JOIN auth.roles r ON r.name = 'media_reviewer'
+WHERE u.username = 'media_reviewer1'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO auth.user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM auth.users u
+JOIN auth.roles r ON r.name = 'media_publisher'
+WHERE u.username = 'media_publisher1'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO core.departments (name, code)
@@ -253,9 +347,9 @@ INSERT INTO core.rank_role_policies (rank_id, role_id)
 SELECT r.id, rl.id
 FROM core.ranks r
 JOIN auth.roles rl
-  ON (r.name = 'ط¹ظ‚ظٹط¯ ط±ظƒظ†' AND rl.name = 'admin')
-  OR (r.name IN ('ط±ط§ط¦ط¯', 'ظ†ظ‚ظٹط¨') AND rl.name = 'instructor')
-  OR (r.name = 'ط±ظ‚ظٹط¨' AND rl.name = 'uploader')
+  ON (r.name = 'عقيد ركن' AND rl.name = 'admin')
+  OR (r.name IN ('رائد', 'نقيب') AND rl.name = 'instructor')
+  OR (r.name = 'رقيب' AND rl.name = 'uploader')
 ON CONFLICT DO NOTHING;
 
 -- =========================

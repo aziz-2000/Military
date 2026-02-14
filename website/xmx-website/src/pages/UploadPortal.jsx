@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import "./UploadPortal.css";
 
@@ -74,7 +74,7 @@ export default function UploadPortal() {
     message: "",
   });
 
-  const loadFiles = async () => {
+  const loadFiles = useCallback(async () => {
     if (!token) return;
     setFilesState((prev) => ({ ...prev, loading: true, error: "" }));
     try {
@@ -95,7 +95,7 @@ export default function UploadPortal() {
         error: error.message,
       }));
     }
-  };
+  }, [filesState.entityType, filesState.search, token]);
 
   useEffect(() => {
     if (!token) {
@@ -107,7 +107,7 @@ export default function UploadPortal() {
       return;
     }
     loadFiles();
-  }, [token]);
+  }, [token, loadFiles]);
 
   const handleLogout = () => {
     localStorage.removeItem(STORAGE_TOKEN_KEY);
@@ -206,15 +206,21 @@ export default function UploadPortal() {
             }
             required
           />
-          <input
-            className="upload-input"
-            type="text"
-            placeholder="Entity Type (candidate/request/exam)"
+          <select
+            className="upload-select"
             value={uploadForm.entityType}
             onChange={(event) =>
               setUploadForm((prev) => ({ ...prev, entityType: event.target.value }))
             }
-          />
+          >
+            <option value="">Entity Type (optional)</option>
+            <option value="media_post">media_post (Media Center)</option>
+            <option value="candidate">candidate</option>
+            <option value="request">request</option>
+            <option value="exam">exam</option>
+            <option value="announcement">announcement</option>
+            <option value="news">news</option>
+          </select>
           <input
             className="upload-input"
             type="text"
@@ -247,6 +253,10 @@ export default function UploadPortal() {
             {formState.loading ? "Uploading..." : "Upload File"}
           </button>
         </form>
+        <div className="upload-state">
+          لصور المركز الإعلامي: ارفع الملف ثم اختره من تبويب المركز الإعلامي في بوابة الإدارة عبر
+          <code>Cover/Gallery File</code>.
+        </div>
         {formState.error && <div className="upload-state error">{formState.error}</div>}
         {formState.message && <div className="upload-state">{formState.message}</div>}
       </section>

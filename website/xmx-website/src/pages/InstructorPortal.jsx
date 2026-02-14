@@ -248,7 +248,7 @@ export default function InstructorPortal() {
         }
       })
       .finally(() => setLoading(false));
-  }, [token]);
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!gradeState.sectionId) {
@@ -267,7 +267,7 @@ export default function InstructorPortal() {
       .catch(() => {
         setGradeState((prev) => ({ ...prev, assessments: [], assessmentId: "", rows: [] }));
       });
-  }, [gradeState.sectionId]);
+  }, [gradeState.sectionId, token]);
 
   useEffect(() => {
     if (!gradeState.sectionId || !gradeState.assessmentId) {
@@ -295,7 +295,7 @@ export default function InstructorPortal() {
           error: fetchError.message,
         }));
       });
-  }, [gradeState.sectionId, gradeState.assessmentId]);
+  }, [gradeState.sectionId, gradeState.assessmentId, token]);
 
   useEffect(() => {
     if (!requestState.requestId || !token) {
@@ -305,7 +305,7 @@ export default function InstructorPortal() {
     loadRequestActions(requestState.requestId).catch((loadError) => {
       setRequestState((prev) => ({ ...prev, error: loadError.message }));
     });
-  }, [requestState.requestId, token]);
+  }, [requestState.requestId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!token) return;
@@ -313,7 +313,7 @@ export default function InstructorPortal() {
     loadMessagesHistory(messageForm.candidateId).catch((loadError) => {
       setMessageForm((prev) => ({ ...prev, loadingHistory: false, error: loadError.message }));
     });
-  }, [messageForm.candidateId, token]);
+  }, [messageForm.candidateId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     localStorage.removeItem(STORAGE_TOKEN_KEY);

@@ -15,11 +15,15 @@ const NAV_ITEMS = [
   { key: "medical", label: "الملف الطبي" },
   { key: "attendance", label: "الحضور والغياب" },
   { key: "reports", label: "التقارير والملخصات" },
+  { key: "media", label: "المركز الإعلامي" },
   { key: "security", label: "الصلاحيات والأدوار" },
 ];
 
 const TRACK_OPTIONS = ["تأسيسية", "تقدمية"];
 const BACKGROUND_OPTIONS = ["جامعي", "عسكري سابق", "مدني"];
+const MEDIA_STATUS_OPTIONS = ["draft", "in_review", "approved", "rejected", "published", "archived"];
+const MEDIA_TYPE_OPTIONS = ["news", "announcement", "event"];
+const MEDIA_AUDIENCE_OPTIONS = ["public", "candidate", "instructor", "admin", "leadership"];
 
 function buildQuery(params) {
   const query = new URLSearchParams();
@@ -30,13 +34,6 @@ function buildQuery(params) {
     query.set(key, normalized);
   });
   return query.toString();
-}
-
-function formatDate(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleDateString("ar-OM");
 }
 
 function formatDateTime(value) {
@@ -86,6 +83,40 @@ function emptyCandidateForm() {
   };
 }
 
+function emptyMediaPostForm() {
+  return {
+    id: "",
+    title: "",
+    body: "",
+    summary: "",
+    categoryId: "",
+    coverFileId: "",
+    coverImageUrl: "",
+    galleryFileIds: [],
+    tagsText: "",
+    galleryText: "",
+    postType: "news",
+    audience: "public",
+    status: "draft",
+    location: "",
+    eventAt: "",
+    publishStartsAt: "",
+    publishEndsAt: "",
+    isPinned: false,
+    isFeatured: false,
+    decisionNote: "",
+  };
+}
+
+function toDateTimeLocal(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset();
+  const adjusted = new Date(date.getTime() - offset * 60000);
+  return adjusted.toISOString().slice(0, 16);
+}
+
 async function apiRequest(path, { method = "GET", token, body, isBlob = false } = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     method,
@@ -111,6 +142,20 @@ export default function AdminPortal() {
   const navigate = useNavigate();
   const token = localStorage.getItem(STORAGE_TOKEN_KEY);
   const roles = useMemo(() => parseRoles(), []);
+  const isAdminPortalUser = roles.includes("admin");
+  const hasMediaPortalRole = roles.some((role) =>
+    ["media_writer", "media_reviewer", "media_publisher"].includes(role)
+  );
+  const hasRole = (...allowedRoles) => roles.some((role) => allowedRoles.includes(role));
+  const canManageMediaCategories = hasRole("admin", "media_publisher");
+  const canEditMediaPosts = hasRole("admin", "media_writer", "media_publisher");
+  const canReviewMediaPosts = hasRole("admin", "media_reviewer");
+  const canPublishMediaPosts = hasRole("admin", "media_publisher");
+  const visibleNavItems = useMemo(() => {
+    if (isAdminPortalUser) return NAV_ITEMS;
+    if (hasMediaPortalRole) return NAV_ITEMS.filter((item) => item.key === "media");
+    return [];
+  }, [isAdminPortalUser, hasMediaPortalRole]);
 
   const [activeTab, setActiveTab] = useState("dashboard");
   const [boot, setBoot] = useState({ loading: true, error: "" });
@@ -246,6 +291,39 @@ export default function AdminPortal() {
     userDraft: [],
     rankDraft: [],
     loading: false,
+    error: "",
+    message: "",
+  });
+  const [mediaFilters, setMediaFilters] = useState({
+    search: "",
+    status: "",
+    categoryId: "",
+    postType: "",
+    audience: "",
+  });
+  const [mediaCategoryForm, setMediaCategoryForm] = useState({
+    nameAr: "",
+    nameEn: "",
+    description: "",
+    sortOrder: 10,
+    isActive: true,
+  });
+  const [mediaPostForm, setMediaPostForm] = useState(() => emptyMediaPostForm());
+  const [media, setMedia] = useState({
+    categories: [],
+    files: [],
+    posts: [],
+    actions: [],
+    dashboard: {
+      summary: null,
+      topCategory: null,
+      weekly: [],
+      alerts: [],
+    },
+    total: 0,
+    selectedPostId: "",
+    loading: false,
+    saving: false,
     error: "",
     message: "",
   });
@@ -588,6 +666,13 @@ export default function AdminPortal() {
   }
 
   useEffect(() => {
+    if (visibleNavItems.some((item) => item.key === activeTab)) return;
+    if (visibleNavItems.length > 0) {
+      setActiveTab(visibleNavItems[0].key);
+    }
+  }, [activeTab, visibleNavItems]);
+
+  useEffect(() => {
     if (!token) {
       setBoot({ loading: false, error: "يرجى تسجيل الدخول أولاً." });
       return;
@@ -595,21 +680,29 @@ export default function AdminPortal() {
     const bootstrap = async () => {
       setBoot({ loading: true, error: "" });
       try {
-        await Promise.all([
-          loadOverview(),
-          loadFilters(),
-          loadCandidateOptions(),
-          loadCandidates(),
-          loadCohortsAndPlatoons(),
-          loadTerms(),
-          loadLeadership(),
-          loadAttendance(),
-          loadMedicalFilters(),
-          loadMedical(),
-          loadReports(),
-          loadWorkflowFilters(),
-          loadWorkflow(),
-        ]);
+        if (isAdminPortalUser) {
+          await Promise.all([
+            loadOverview(),
+            loadFilters(),
+            loadCandidateOptions(),
+            loadCandidates(),
+            loadCohortsAndPlatoons(),
+            loadTerms(),
+            loadLeadership(),
+            loadAttendance(),
+            loadMedicalFilters(),
+            loadMedical(),
+            loadReports(),
+            loadWorkflowFilters(),
+            loadWorkflow(),
+          ]);
+        } else if (hasMediaPortalRole) {
+          await refreshMedia();
+        } else {
+          throw Object.assign(new Error("لا توجد صلاحية للوصول إلى بوابة الإدارة."), {
+            status: 403,
+          });
+        }
         setBoot({ loading: false, error: "" });
       } catch (error) {
         setBoot({
@@ -619,27 +712,27 @@ export default function AdminPortal() {
       }
     };
     bootstrap();
-  }, [token]);
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!academics.termId || !token) return;
     loadCourses(academics.termId).catch((error) => setAcademics((prev) => ({ ...prev, error: error.message })));
-  }, [academics.termId, token]);
+  }, [academics.termId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!academics.termId || !token) return;
     loadSections(academics.termId, academics.courseId).catch((error) => setAcademics((prev) => ({ ...prev, error: error.message })));
-  }, [academics.termId, academics.courseId, token]);
+  }, [academics.termId, academics.courseId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!academics.sectionId || !token) return;
     loadAssessments(academics.sectionId).catch((error) => setAcademics((prev) => ({ ...prev, error: error.message })));
-  }, [academics.sectionId, token]);
+  }, [academics.sectionId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!academics.sectionId || !academics.assessmentId || !token) return;
     loadGrades(academics.sectionId, academics.assessmentId).catch((error) => setAcademics((prev) => ({ ...prev, error: error.message })));
-  }, [academics.sectionId, academics.assessmentId, token]);
+  }, [academics.sectionId, academics.assessmentId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!security.selectedRoleId) return;
@@ -667,7 +760,17 @@ export default function AdminPortal() {
     loadWorkflowActions(workflow.selectedRequestId).catch((error) => {
       setWorkflow((prev) => ({ ...prev, error: error.message }));
     });
-  }, [workflow.selectedRequestId, token]);
+  }, [workflow.selectedRequestId, token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!media.selectedPostId || !token) {
+      setMedia((prev) => ({ ...prev, actions: [] }));
+      return;
+    }
+    loadMediaActions(media.selectedPostId).catch((error) => {
+      setMedia((prev) => ({ ...prev, error: error.message }));
+    });
+  }, [media.selectedPostId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const selected = workflow.rows.find((row) => row.id === workflow.selectedRequestId);
@@ -687,6 +790,7 @@ export default function AdminPortal() {
   const reportPlatoons = getPlatoonsByCohort(reportFilters.cohortId);
   const workflowPlatoons = getPlatoonsByCohort(workflowFilters.cohortId);
   const selectedWorkflowRequest = workflow.rows.find((row) => row.id === workflow.selectedRequestId) || null;
+  const selectedMediaPost = media.posts.find((row) => row.id === media.selectedPostId) || null;
 
   function toggleValue(value, values) {
     return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
@@ -1021,6 +1125,239 @@ export default function AdminPortal() {
       URL.revokeObjectURL(url);
     } catch (error) {
       setReports((prev) => ({ ...prev, error: error.message }));
+    }
+  }
+
+  function fillMediaPostForm(post) {
+    if (!post) return;
+    setMediaPostForm({
+      id: post.id || "",
+      title: post.title || "",
+      body: post.body || "",
+      summary: post.summary || "",
+      categoryId: post.categoryId || "",
+      coverFileId: post.coverFileId || "",
+      coverImageUrl: post.coverImageUrl || "",
+      galleryFileIds: Array.isArray(post.galleryFileIds) ? post.galleryFileIds : [],
+      tagsText: Array.isArray(post.tags) ? post.tags.join(", ") : "",
+      galleryText: Array.isArray(post.gallery) ? post.gallery.map((item) => item?.url || "").filter(Boolean).join("\n") : "",
+      postType: post.postType || "news",
+      audience: post.audience || "public",
+      status: post.status || "draft",
+      location: post.location || "",
+      eventAt: toDateTimeLocal(post.eventAt),
+      publishStartsAt: toDateTimeLocal(post.publishStartsAt),
+      publishEndsAt: toDateTimeLocal(post.publishEndsAt),
+      isPinned: Boolean(post.isPinned),
+      isFeatured: Boolean(post.isFeatured),
+      decisionNote: post.decisionNote || "",
+    });
+  }
+
+  async function loadMediaCategories() {
+    const payload = await apiRequest("/admin/media/categories", { token });
+    setMedia((prev) => ({ ...prev, categories: payload.rows || [] }));
+  }
+
+  async function loadMediaFiles() {
+    const payload = await apiRequest("/admin/media/files?limit=300", { token });
+    setMedia((prev) => ({ ...prev, files: payload.rows || [] }));
+  }
+
+  async function loadMediaDashboard(customFilters = null) {
+    const source = customFilters || mediaFilters;
+    const query = buildQuery({
+      status: source.status || undefined,
+      category_id: source.categoryId || undefined,
+    });
+    const payload = await apiRequest(`/admin/media/dashboard${query ? `?${query}` : ""}`, { token });
+    setMedia((prev) => ({
+      ...prev,
+      dashboard: {
+        summary: payload.summary || null,
+        topCategory: payload.topCategory || null,
+        weekly: payload.weekly || [],
+        alerts: payload.alerts || [],
+      },
+    }));
+  }
+
+  async function loadMediaPosts(customFilters = null) {
+    const source = customFilters || mediaFilters;
+    setMedia((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      const query = buildQuery({
+        search: source.search || undefined,
+        status: source.status || undefined,
+        category_id: source.categoryId || undefined,
+        post_type: source.postType || undefined,
+        audience: source.audience || undefined,
+        limit: 120,
+      });
+      const payload = await apiRequest(`/admin/media/posts${query ? `?${query}` : ""}`, { token });
+      setMedia((prev) => {
+        const rows = payload.rows || [];
+        const selectedPostId =
+          (prev.selectedPostId && rows.some((row) => row.id === prev.selectedPostId)
+            ? prev.selectedPostId
+            : rows[0]?.id) || "";
+        return {
+          ...prev,
+          posts: rows,
+          total: Number(payload.total || 0),
+          selectedPostId,
+          loading: false,
+        };
+      });
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, loading: false, error: error.message }));
+    }
+  }
+
+  async function loadMediaActions(postId) {
+    if (!postId) {
+      setMedia((prev) => ({ ...prev, actions: [] }));
+      return;
+    }
+    try {
+      const payload = await apiRequest(`/admin/media/posts/${postId}/actions`, { token });
+      setMedia((prev) => ({ ...prev, actions: payload.rows || [] }));
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, actions: [], error: error.message }));
+    }
+  }
+
+  async function refreshMedia(customFilters = null) {
+    setMedia((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      await Promise.all([
+        loadMediaCategories(),
+        loadMediaPosts(customFilters),
+        loadMediaFiles(),
+        loadMediaDashboard(customFilters),
+      ]);
+      setMedia((prev) => ({ ...prev, loading: false, error: "" }));
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, loading: false, error: error.message }));
+    }
+  }
+
+  async function saveMediaCategory(event) {
+    event.preventDefault();
+    if (!mediaCategoryForm.nameAr.trim()) return;
+    setMedia((prev) => ({ ...prev, saving: true, error: "", message: "" }));
+    try {
+      await apiRequest("/admin/media/categories", {
+        method: "POST",
+        token,
+        body: {
+          nameAr: mediaCategoryForm.nameAr,
+          nameEn: mediaCategoryForm.nameEn || undefined,
+          description: mediaCategoryForm.description || undefined,
+          sortOrder: Number(mediaCategoryForm.sortOrder || 0),
+          isActive: mediaCategoryForm.isActive,
+        },
+      });
+      setMediaCategoryForm({
+        nameAr: "",
+        nameEn: "",
+        description: "",
+        sortOrder: 10,
+        isActive: true,
+      });
+      setMedia((prev) => ({ ...prev, saving: false, message: "تم إنشاء التصنيف." }));
+      await loadMediaCategories();
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, saving: false, error: error.message }));
+    }
+  }
+
+  async function saveMediaPost(event) {
+    event.preventDefault();
+    if (!mediaPostForm.title.trim() || !mediaPostForm.body.trim()) return;
+    setMedia((prev) => ({ ...prev, saving: true, error: "", message: "" }));
+    try {
+      const toIso = (value) => {
+        if (!value) return undefined;
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+      };
+      const galleryFromText = mediaPostForm.galleryText
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((url) => ({ url }));
+      const selectedGalleryFileIds = Array.isArray(mediaPostForm.galleryFileIds)
+        ? mediaPostForm.galleryFileIds.filter(Boolean)
+        : [];
+      const payload = {
+        title: mediaPostForm.title.trim(),
+        body: mediaPostForm.body.trim(),
+        summary: mediaPostForm.summary.trim() || undefined,
+        categoryId: mediaPostForm.categoryId || undefined,
+        coverFileId: mediaPostForm.coverFileId || undefined,
+        coverImageUrl: mediaPostForm.coverFileId
+          ? undefined
+          : mediaPostForm.coverImageUrl.trim() || undefined,
+        tags: mediaPostForm.tagsText
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        galleryFileIds: selectedGalleryFileIds,
+        gallery: selectedGalleryFileIds.length > 0 ? undefined : galleryFromText,
+        postType: mediaPostForm.postType || "news",
+        audience: mediaPostForm.audience || "public",
+        status: mediaPostForm.status || "draft",
+        location: mediaPostForm.location.trim() || undefined,
+        eventAt: toIso(mediaPostForm.eventAt),
+        publishStartsAt: toIso(mediaPostForm.publishStartsAt),
+        publishEndsAt: toIso(mediaPostForm.publishEndsAt),
+        isPinned: mediaPostForm.isPinned,
+        isFeatured: mediaPostForm.isFeatured,
+        decisionNote: mediaPostForm.decisionNote.trim() || undefined,
+      };
+
+      if (mediaPostForm.id) {
+        await apiRequest(`/admin/media/posts/${mediaPostForm.id}`, {
+          method: "PUT",
+          token,
+          body: payload,
+        });
+      } else {
+        await apiRequest("/admin/media/posts", {
+          method: "POST",
+          token,
+          body: payload,
+        });
+      }
+      setMediaPostForm(emptyMediaPostForm());
+      setMedia((prev) => ({
+        ...prev,
+        saving: false,
+        message: mediaPostForm.id ? "تم تحديث الخبر." : "تم إنشاء الخبر.",
+      }));
+      await Promise.all([loadMediaPosts(), loadMediaDashboard(), loadMediaFiles()]);
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, saving: false, error: error.message }));
+    }
+  }
+
+  async function updateMediaPostStatus(postId, action) {
+    if (!postId || !action) return;
+    setMedia((prev) => ({ ...prev, loading: true, error: "", message: "" }));
+    try {
+      await apiRequest(`/admin/media/posts/${postId}/status`, {
+        method: "PUT",
+        token,
+        body: {
+          action,
+          note: mediaPostForm.decisionNote || undefined,
+        },
+      });
+      setMedia((prev) => ({ ...prev, loading: false, message: "تم تحديث حالة النشر." }));
+      await Promise.all([loadMediaPosts(), loadMediaActions(postId), loadMediaDashboard()]);
+    } catch (error) {
+      setMedia((prev) => ({ ...prev, loading: false, error: error.message }));
     }
   }
 
@@ -2203,6 +2540,516 @@ export default function AdminPortal() {
       </section>
     );
   }
+
+  if (activeTab === "media") {
+    activeContent = (
+      <section className="admin-section">
+        <div className="admin-section-header">
+          <h2>المركز الإعلامي</h2>
+          <button className="admin-button" onClick={() => refreshMedia()} disabled={media.loading}>
+            {media.loading ? "..." : "تحديث"}
+          </button>
+        </div>
+
+        <div className="admin-filters wide">
+          <input
+            className="admin-input"
+            placeholder="بحث بعنوان الخبر أو الملخص"
+            value={mediaFilters.search}
+            onChange={(event) =>
+              setMediaFilters((prev) => ({ ...prev, search: event.target.value }))
+            }
+          />
+          <select
+            className="admin-select"
+            value={mediaFilters.status}
+            onChange={(event) =>
+              setMediaFilters((prev) => ({ ...prev, status: event.target.value }))
+            }
+          >
+            <option value="">كل الحالات</option>
+            {MEDIA_STATUS_OPTIONS.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={mediaFilters.categoryId}
+            onChange={(event) =>
+              setMediaFilters((prev) => ({ ...prev, categoryId: event.target.value }))
+            }
+          >
+            <option value="">كل التصنيفات</option>
+            {media.categories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.nameAr}
+              </option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={mediaFilters.postType}
+            onChange={(event) =>
+              setMediaFilters((prev) => ({ ...prev, postType: event.target.value }))
+            }
+          >
+            <option value="">كل الأنواع</option>
+            {MEDIA_TYPE_OPTIONS.map((type) => (
+              <option key={type} value={type}>
+                {type}
+              </option>
+            ))}
+          </select>
+          <select
+            className="admin-select"
+            value={mediaFilters.audience}
+            onChange={(event) =>
+              setMediaFilters((prev) => ({ ...prev, audience: event.target.value }))
+            }
+          >
+            <option value="">كل الجماهير</option>
+            {MEDIA_AUDIENCE_OPTIONS.map((audience) => (
+              <option key={audience} value={audience}>
+                {audience}
+              </option>
+            ))}
+          </select>
+          <button
+            className="admin-button"
+            onClick={() => Promise.all([loadMediaPosts(), loadMediaDashboard()])}
+            disabled={media.loading}
+          >
+            {media.loading ? "..." : "تطبيق الفلاتر"}
+          </button>
+        </div>
+
+        {media.error ? <div className="admin-state error">{media.error}</div> : null}
+        {media.message ? <div className="admin-state">{media.message}</div> : null}
+
+        <div className="admin-metrics">
+          <div className="metric-card">
+            <span>إجمالي المنشورات</span>
+            <h3>{formatNumber(media.dashboard.summary?.totalPosts ?? media.total)}</h3>
+          </div>
+          <div className="metric-card">
+            <span>منشور</span>
+            <h3>{formatNumber(media.dashboard.summary?.publishedPosts ?? 0)}</h3>
+          </div>
+          <div className="metric-card">
+            <span>معدل النشر</span>
+            <h3>{`${formatNumber(media.dashboard.summary?.publishRate ?? 0)}%`}</h3>
+          </div>
+          <div className="metric-card">
+            <span>أكثر تصنيف نشاطًا</span>
+            <h3>{media.dashboard.topCategory?.nameAr || "-"}</h3>
+          </div>
+        </div>
+
+        <div className="admin-grid admin-two-columns">
+          <div className="admin-card">
+            <h3>الأداء الأسبوعي</h3>
+            {media.dashboard.alerts?.length ? (
+              <div className="admin-state">{media.dashboard.alerts.map((item) => item.message).join(" | ")}</div>
+            ) : (
+              <div className="admin-state">لا توجد تنبيهات حرجة.</div>
+            )}
+            <div className="admin-table compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الأسبوع</th>
+                    <th>منشأ</th>
+                    <th>منشور</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(media.dashboard.weekly || []).map((row) => (
+                    <tr key={String(row.weekStart)}>
+                      <td>{formatDateTime(row.weekStart)}</td>
+                      <td>{formatNumber(row.createdCount)}</td>
+                      <td>{formatNumber(row.publishedCount)}</td>
+                    </tr>
+                  ))}
+                  {(media.dashboard.weekly || []).length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="empty">
+                        لا توجد بيانات.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="admin-card">
+            {canManageMediaCategories ? (
+              <>
+                <h3>إضافة تصنيف إعلامي</h3>
+                <form className="admin-form" onSubmit={saveMediaCategory}>
+                  <input
+                    className="admin-input"
+                    placeholder="اسم التصنيف بالعربية"
+                    value={mediaCategoryForm.nameAr}
+                    onChange={(event) =>
+                      setMediaCategoryForm((prev) => ({ ...prev, nameAr: event.target.value }))
+                    }
+                    required
+                  />
+                  <input
+                    className="admin-input"
+                    placeholder="الاسم الإنجليزي (اختياري)"
+                    value={mediaCategoryForm.nameEn}
+                    onChange={(event) =>
+                      setMediaCategoryForm((prev) => ({ ...prev, nameEn: event.target.value }))
+                    }
+                  />
+                  <input
+                    className="admin-input"
+                    placeholder="وصف التصنيف"
+                    value={mediaCategoryForm.description}
+                    onChange={(event) =>
+                      setMediaCategoryForm((prev) => ({ ...prev, description: event.target.value }))
+                    }
+                  />
+                  <input
+                    className="admin-input"
+                    type="number"
+                    min="0"
+                    placeholder="ترتيب العرض"
+                    value={mediaCategoryForm.sortOrder}
+                    onChange={(event) =>
+                      setMediaCategoryForm((prev) => ({ ...prev, sortOrder: Number(event.target.value || 0) }))
+                    }
+                  />
+                  <label className="admin-pill">
+                    <input
+                      type="checkbox"
+                      checked={mediaCategoryForm.isActive}
+                      onChange={(event) =>
+                        setMediaCategoryForm((prev) => ({ ...prev, isActive: event.target.checked }))
+                      }
+                    />{" "}
+                    تصنيف فعّال
+                  </label>
+                  <button className="admin-button" type="submit" disabled={media.saving}>
+                    {media.saving ? "..." : "حفظ التصنيف"}
+                  </button>
+                </form>
+              </>
+            ) : (
+              <>
+                <h3>التصنيفات الإعلامية</h3>
+                <div className="admin-state">صلاحية إنشاء التصنيفات متاحة للناشر فقط.</div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {canEditMediaPosts ? (
+          <div className="admin-card">
+            <h3>{mediaPostForm.id ? "تعديل خبر" : "إضافة خبر"}</h3>
+            <form className="admin-form" onSubmit={saveMediaPost}>
+              <input
+                className="admin-input"
+                placeholder="عنوان الخبر"
+                value={mediaPostForm.title}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, title: event.target.value }))}
+                required
+              />
+              <textarea
+                className="admin-input"
+                rows={4}
+                placeholder="ملخص الخبر"
+                value={mediaPostForm.summary}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, summary: event.target.value }))}
+              />
+              <textarea
+                className="admin-input"
+                rows={8}
+                placeholder="محتوى الخبر"
+                value={mediaPostForm.body}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, body: event.target.value }))}
+                required
+              />
+              <select
+                className="admin-select"
+                value={mediaPostForm.categoryId}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, categoryId: event.target.value }))}
+              >
+                <option value="">بدون تصنيف</option>
+                {media.categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.nameAr}
+                  </option>
+                ))}
+              </select>
+              <div className="admin-filters wide">
+                <select
+                  className="admin-select"
+                  value={mediaPostForm.postType}
+                  onChange={(event) => setMediaPostForm((prev) => ({ ...prev, postType: event.target.value }))}
+                >
+                  {MEDIA_TYPE_OPTIONS.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="admin-select"
+                  value={mediaPostForm.audience}
+                  onChange={(event) => setMediaPostForm((prev) => ({ ...prev, audience: event.target.value }))}
+                >
+                  {MEDIA_AUDIENCE_OPTIONS.map((audience) => (
+                    <option key={audience} value={audience}>
+                      {audience}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="admin-select"
+                  value={mediaPostForm.status}
+                  onChange={(event) => setMediaPostForm((prev) => ({ ...prev, status: event.target.value }))}
+                >
+                  {MEDIA_STATUS_OPTIONS.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <select
+                className="admin-select"
+                value={mediaPostForm.coverFileId}
+                onChange={(event) =>
+                  setMediaPostForm((prev) => ({
+                    ...prev,
+                    coverFileId: event.target.value,
+                  }))
+                }
+              >
+                <option value="">اختر صورة غلاف من الملفات المرفوعة</option>
+                {media.files.map((file) => (
+                  <option key={file.id} value={file.id}>
+                    {file.originalName}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="admin-select"
+                multiple
+                value={mediaPostForm.galleryFileIds}
+                onChange={(event) => {
+                  const selectedValues = Array.from(event.target.selectedOptions).map((option) => option.value);
+                  setMediaPostForm((prev) => ({ ...prev, galleryFileIds: selectedValues }));
+                }}
+              >
+                {media.files.map((file) => (
+                  <option key={`gallery-${file.id}`} value={file.id}>
+                    {file.originalName}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="admin-input"
+                placeholder="Legacy Cover URL (optional)"
+                value={mediaPostForm.coverImageUrl}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, coverImageUrl: event.target.value }))}
+              />
+              <input
+                className="admin-input"
+                placeholder="الوسوم (مفصولة بفواصل)"
+                value={mediaPostForm.tagsText}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, tagsText: event.target.value }))}
+              />
+              <textarea
+                className="admin-input"
+                rows={3}
+                placeholder="Legacy gallery URLs (optional, one URL per line)"
+                value={mediaPostForm.galleryText}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, galleryText: event.target.value }))}
+              />
+              <textarea
+                className="admin-input"
+                rows={2}
+                placeholder="ملاحظة إجرائية"
+                value={mediaPostForm.decisionNote}
+                onChange={(event) => setMediaPostForm((prev) => ({ ...prev, decisionNote: event.target.value }))}
+              />
+              <div className="report-actions">
+                <button className="admin-button" type="submit" disabled={media.saving}>
+                  {media.saving ? "..." : mediaPostForm.id ? "تحديث الخبر" : "إنشاء الخبر"}
+                </button>
+                {mediaPostForm.id ? (
+                  <button className="admin-button secondary" type="button" onClick={() => setMediaPostForm(emptyMediaPostForm())}>
+                    إلغاء التعديل
+                  </button>
+                ) : null}
+              </div>
+            </form>
+          </div>
+        ) : null}
+
+        <div className="admin-table">
+          <table>
+            <thead>
+              <tr>
+                <th>العنوان</th>
+                <th>التصنيف</th>
+                <th>النوع</th>
+                <th>الحالة</th>
+                <th>آخر تحديث</th>
+                <th>الإجراءات</th>
+              </tr>
+            </thead>
+            <tbody>
+              {media.posts.length === 0 ? (
+                <tr>
+                  <td className="empty" colSpan={6}>
+                    لا توجد منشورات إعلامية.
+                  </td>
+                </tr>
+              ) : (
+                media.posts.map((post) => (
+                  <tr key={post.id}>
+                    <td>{post.title}</td>
+                    <td>{post.categoryName || "-"}</td>
+                    <td>{post.postType}</td>
+                    <td>{post.status}</td>
+                    <td>{formatDateTime(post.updatedAt)}</td>
+                    <td>
+                      <div className="report-actions">
+                        {canEditMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => {
+                              fillMediaPostForm(post);
+                              setMedia((prev) => ({ ...prev, selectedPostId: post.id }));
+                            }}
+                          >
+                            تعديل
+                          </button>
+                        ) : null}
+                        {canEditMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "submit")}
+                          >
+                            إرسال للمراجعة
+                          </button>
+                        ) : null}
+                        {(canEditMediaPosts || canReviewMediaPosts || canPublishMediaPosts) ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "return_to_draft")}
+                          >
+                            إعادة لمسودة
+                          </button>
+                        ) : null}
+                        {canReviewMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "approve")}
+                          >
+                            اعتماد
+                          </button>
+                        ) : null}
+                        {canReviewMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "reject")}
+                          >
+                            رفض
+                          </button>
+                        ) : null}
+                        {canPublishMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "publish")}
+                          >
+                            نشر
+                          </button>
+                        ) : null}
+                        {canPublishMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, "archive")}
+                          >
+                            أرشفة
+                          </button>
+                        ) : null}
+                        {canPublishMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, post.isPinned ? "unpin" : "pin")}
+                          >
+                            {post.isPinned ? "إلغاء التثبيت" : "تثبيت"}
+                          </button>
+                        ) : null}
+                        {canPublishMediaPosts ? (
+                          <button
+                            className="admin-button secondary"
+                            onClick={() => updateMediaPostStatus(post.id, post.isFeatured ? "unfeature" : "feature")}
+                          >
+                            {post.isFeatured ? "إلغاء التمييز" : "تمييز"}
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {selectedMediaPost ? (
+          <div className="admin-card">
+            <h3>سجل الإجراءات: {selectedMediaPost.title}</h3>
+            <div className="admin-table compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>الإجراء</th>
+                    <th>من</th>
+                    <th>إلى</th>
+                    <th>ملاحظة</th>
+                    <th>المنفذ</th>
+                    <th>الوقت</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {media.actions.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="empty">
+                        لا توجد إجراءات مسجلة.
+                      </td>
+                    </tr>
+                  ) : (
+                    media.actions.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.action}</td>
+                        <td>{item.from_status || "-"}</td>
+                        <td>{item.to_status || "-"}</td>
+                        <td>{item.note || "-"}</td>
+                        <td>{item.acted_by_username || "-"}</td>
+                        <td>{formatDateTime(item.acted_at)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+
   if (activeTab === "security") {
     activeContent = (
       <section className="admin-section">
@@ -2326,7 +3173,7 @@ export default function AdminPortal() {
       <div className="admin-layout">
         <aside className="admin-sidebar">
           <nav className="admin-nav">
-            {NAV_ITEMS.map((item) => (
+            {visibleNavItems.map((item) => (
               <button
                 key={item.key}
                 className={`admin-nav-item ${activeTab === item.key ? "active" : ""}`}
@@ -2345,6 +3192,11 @@ export default function AdminPortal() {
                       setWorkflow((prev) => ({ ...prev, error: error.message }))
                     );
                   }
+                  if (item.key === "media" && media.posts.length === 0) {
+                    refreshMedia().catch((error) =>
+                      setMedia((prev) => ({ ...prev, error: error.message }))
+                    );
+                  }
                 }}
               >
                 {item.label}
@@ -2357,3 +3209,4 @@ export default function AdminPortal() {
     </div>
   );
 }
+

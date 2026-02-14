@@ -68,7 +68,7 @@ function requireAuth(req, res, next) {
     const payload = jwt.verify(token, jwtSecret);
     req.user = payload;
     return next();
-  } catch (error) {
+  } catch (_error) {
     return res
       .status(401)
       .json({ message: "انتهت الجلسة. يرجى تسجيل الدخول مجدداً." });
@@ -285,11 +285,525 @@ async function ensureWorkflowSchema() {
   );
 }
 
+function slugify(value, fallbackPrefix = "post") {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return `${fallbackPrefix}-${Date.now().toString(36)}-${crypto
+      .randomBytes(3)
+      .toString("hex")}`;
+  }
+
+  const slug = normalized
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+
+  if (!slug.length) {
+    return `${fallbackPrefix}-${Date.now().toString(36)}-${crypto
+      .randomBytes(3)
+      .toString("hex")}`;
+  }
+
+  return slug;
+}
+
+function normalizeMediaStatus(value, { allowApproved = true } = {}) {
+  const status = normalizeString(value)?.toLowerCase();
+  if (!status) return "draft";
+  const allowed = allowApproved
+    ? ["draft", "in_review", "approved", "published", "archived", "rejected"]
+    : ["draft", "in_review", "published", "archived", "rejected"];
+  return allowed.includes(status) ? status : null;
+}
+
+function normalizeMediaType(value) {
+  const postType = normalizeString(value)?.toLowerCase();
+  if (!postType) return "news";
+  if (["news", "announcement", "event", "story", "press"].includes(postType)) {
+    return postType;
+  }
+  return null;
+}
+
+function normalizeMediaAudience(value) {
+  const audience = normalizeString(value)?.toLowerCase();
+  if (!audience) return "public";
+  if (["public", "candidate", "instructor", "admin", "leadership"].includes(audience)) {
+    return audience;
+  }
+  return null;
+}
+
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeString(item))
+      .filter((item) => item !== null)
+      .slice(0, 30);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => normalizeString(item))
+      .filter((item) => item !== null)
+      .slice(0, 30);
+  }
+
+  return [];
+}
+
+function isValidUuid(value) {
+  if (!value) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value)
+  );
+}
+
+function normalizeUuidArray(value, maxItems = 60) {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  const result = [];
+  const seen = new Set();
+  for (const item of source) {
+    const normalized = normalizeString(item);
+    if (!normalized || !isValidUuid(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
+function buildMediaFilePublicUrl(fileId) {
+  const normalized = normalizeString(fileId);
+  if (!normalized) return null;
+  return `/api/media/files/${normalized}`;
+}
+
+function isLikelyImageFile(fileRow) {
+  const mimeType = normalizeString(fileRow?.mime_type)?.toLowerCase();
+  if (mimeType && mimeType.startsWith("image/")) return true;
+  const fileName = normalizeString(fileRow?.original_name)?.toLowerCase() || "";
+  return /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(fileName);
+}
+
+function normalizeGallery(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const url = normalizeString(item);
+        if (!url) return null;
+        return { url };
+      }
+      if (typeof item === "object" && item !== null) {
+        const fileId = normalizeString(item.fileId ?? item.file_id);
+        const url = normalizeString(item.url) || buildMediaFilePublicUrl(fileId);
+        if (fileId && !isValidUuid(fileId)) return null;
+        if (!url && !fileId) return null;
+        return {
+          fileId,
+          url,
+          caption: normalizeString(item.caption),
+        };
+      }
+      return null;
+    })
+    .filter((item) => item !== null)
+    .slice(0, 20);
+}
+
+function mapMediaPostRow(row) {
+  const coverFileId = normalizeString(row.cover_file_id);
+  const rawGallery = Array.isArray(row.gallery) ? row.gallery : [];
+  const gallery = rawGallery
+    .map((item) => {
+      if (typeof item === "string") {
+        const url = normalizeString(item);
+        return url ? { url } : null;
+      }
+      if (typeof item !== "object" || item === null) return null;
+      const fileId = normalizeString(item.fileId ?? item.file_id);
+      const url = normalizeString(item.url) || buildMediaFilePublicUrl(fileId);
+      if (!fileId && !url) return null;
+      return {
+        fileId,
+        url,
+        caption: normalizeString(item.caption),
+      };
+    })
+    .filter((item) => item !== null);
+
+  const galleryFileIds = Array.from(
+    new Set(gallery.map((item) => normalizeString(item.fileId)).filter((item) => item !== null))
+  );
+
+  return {
+    id: row.id,
+    categoryId: row.category_id,
+    categorySlug: row.category_slug,
+    categoryName: row.category_name,
+    title: row.title,
+    slug: row.slug,
+    summary: row.summary,
+    body: row.body,
+    coverFileId,
+    coverImageUrl: normalizeString(row.cover_image_url) || buildMediaFilePublicUrl(coverFileId),
+    gallery,
+    galleryFileIds,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    postType: row.post_type,
+    audience: row.audience,
+    status: row.status,
+    isPinned: Boolean(row.is_pinned),
+    isFeatured: Boolean(row.is_featured),
+    eventAt: row.event_at,
+    location: row.location,
+    viewsCount: Number(row.views_count || 0),
+    publishStartsAt: row.publish_starts_at,
+    publishEndsAt: row.publish_ends_at,
+    publishedAt: row.published_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by,
+    createdByName: row.created_by_name,
+    approvedBy: row.approved_by,
+    approvedByName: row.approved_by_name,
+    decisionNote: row.decision_note,
+  };
+}
+
+const MEDIA_ROLES = ["admin", "media_writer", "media_reviewer", "media_publisher"];
+const MEDIA_EDITOR_ROLES = ["admin", "media_writer", "media_publisher"];
+const MEDIA_REVIEWER_ROLES = ["admin", "media_reviewer"];
+const MEDIA_PUBLISHER_ROLES = ["admin", "media_publisher"];
+const MEDIA_FILE_ACCESS_ROLES = [
+  "admin",
+  "uploader",
+  "media_writer",
+  "media_reviewer",
+  "media_publisher",
+];
+
+function hasAnyRole(userRoles = [], allowedRoles = []) {
+  return allowedRoles.some((role) => userRoles.includes(role));
+}
+
+async function ensureMediaCenterSchema() {
+  await ensureMediaRolePermissions();
+
+  await pool.query(`
+    create table if not exists comms.media_categories (
+      id          uuid primary key default gen_random_uuid(),
+      slug        text unique not null,
+      name_ar     text not null,
+      name_en     text,
+      description text,
+      sort_order  int not null default 0,
+      is_active   boolean not null default true,
+      created_by  uuid references auth.users(id) on delete set null,
+      created_at  timestamptz not null default now(),
+      updated_at  timestamptz not null default now()
+    )
+  `);
+
+  await pool.query(`
+    create table if not exists comms.media_posts (
+      id                uuid primary key default gen_random_uuid(),
+      category_id       uuid references comms.media_categories(id) on delete set null,
+      title             text not null,
+      slug              text unique,
+      summary           text,
+      body              text not null,
+      cover_image_url   text,
+      cover_file_id     uuid references files.file_objects(id) on delete set null,
+      gallery           jsonb not null default '[]'::jsonb,
+      tags              text[] not null default '{}',
+      post_type         text not null default 'news',
+      audience          text not null default 'public',
+      status            text not null default 'draft',
+      is_pinned         boolean not null default false,
+      is_featured       boolean not null default false,
+      event_at          timestamptz,
+      location          text,
+      views_count       int not null default 0,
+      publish_starts_at timestamptz,
+      publish_ends_at   timestamptz,
+      published_at      timestamptz,
+      created_by        uuid references auth.users(id) on delete set null,
+      approved_by       uuid references auth.users(id) on delete set null,
+      created_at        timestamptz not null default now(),
+      updated_at        timestamptz not null default now(),
+      last_decision_at  timestamptz,
+      last_decision_by  uuid references auth.users(id) on delete set null,
+      decision_note     text
+    )
+  `);
+
+  await pool.query(`
+    alter table comms.media_posts
+      add column if not exists cover_file_id uuid references files.file_objects(id) on delete set null
+  `);
+
+  await pool.query(`
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint where conname = 'chk_media_posts_type'
+      ) then
+        alter table comms.media_posts
+          add constraint chk_media_posts_type
+          check (post_type in ('news', 'announcement', 'event', 'story', 'press'));
+      end if;
+
+      if not exists (
+        select 1 from pg_constraint where conname = 'chk_media_posts_audience'
+      ) then
+        alter table comms.media_posts
+          add constraint chk_media_posts_audience
+          check (audience in ('public', 'candidate', 'instructor', 'admin', 'leadership'));
+      end if;
+
+      if not exists (
+        select 1 from pg_constraint where conname = 'chk_media_posts_status'
+      ) then
+        alter table comms.media_posts
+          add constraint chk_media_posts_status
+          check (status in ('draft', 'in_review', 'approved', 'published', 'archived', 'rejected'));
+      end if;
+    end $$;
+  `);
+
+  await pool.query(`
+    create table if not exists comms.media_post_actions (
+      id          bigserial primary key,
+      post_id     uuid not null references comms.media_posts(id) on delete cascade,
+      action      text not null,
+      from_status text,
+      to_status   text,
+      note        text,
+      acted_by    uuid references auth.users(id) on delete set null,
+      acted_at    timestamptz not null default now(),
+      metadata    jsonb not null default '{}'::jsonb
+    )
+  `);
+
+  await pool.query(
+    `create index if not exists idx_media_categories_active_order on comms.media_categories(is_active, sort_order, name_ar)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_posts_status_published on comms.media_posts(status, published_at desc)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_posts_category on comms.media_posts(category_id)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_posts_type_audience on comms.media_posts(post_type, audience)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_posts_flags on comms.media_posts(is_pinned desc, is_featured desc, created_at desc)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_posts_cover_file on comms.media_posts(cover_file_id)`
+  );
+  await pool.query(
+    `create index if not exists idx_media_post_actions_post_time on comms.media_post_actions(post_id, acted_at desc)`
+  );
+  await pool.query(
+    `create index if not exists idx_file_links_media_post on files.file_links(entity_type, entity_id)`
+  );
+
+  await pool.query(`
+    insert into comms.media_categories (slug, name_ar, name_en, description, sort_order)
+    values
+      ('college-news', 'أخبار الكلية', 'College News', 'الأخبار الرسمية للكلية والأنشطة العامة.', 10),
+      ('training-activities', 'الأنشطة والتدريب', 'Training Activities', 'التغطية الإعلامية للتمارين والأنشطة التدريبية.', 20),
+      ('official-announcements', 'التوجيهات الرسمية', 'Official Announcements', 'الإعلانات والتوجيهات الرسمية المعتمدة.', 30),
+      ('candidate-success', 'قصص نجاح المرشحين', 'Candidate Success Stories', 'قصص تميز وإنجازات الضباط المرشحين.', 40),
+      ('press-releases', 'بيانات صحفية', 'Press Releases', 'البيانات الصحفية المعتمدة للنشر الخارجي.', 50)
+    on conflict (slug) do nothing
+  `);
+}
+
+async function ensureMediaRolePermissions() {
+  await pool.query(`
+    insert into auth.roles (name, description)
+    values
+      ('media_writer', 'Media content writer'),
+      ('media_reviewer', 'Media reviewer'),
+      ('media_publisher', 'Media publisher')
+    on conflict (name) do nothing
+  `);
+
+  await pool.query(`
+    insert into auth.permissions (code, description)
+    values
+      ('media.categories.read', 'Read media categories'),
+      ('media.categories.write', 'Manage media categories'),
+      ('media.posts.read', 'Read media posts'),
+      ('media.posts.write', 'Create and update media posts'),
+      ('media.posts.review', 'Review and approve/reject media posts'),
+      ('media.posts.publish', 'Publish/archive/pin media posts'),
+      ('media.files.read', 'Read uploaded media files'),
+      ('media.dashboard.read', 'Read media dashboard')
+    on conflict (code) do nothing
+  `);
+
+  await pool.query(`
+    with mapping(role_name, permission_code) as (
+      values
+        ('admin', 'media.categories.read'),
+        ('admin', 'media.categories.write'),
+        ('admin', 'media.posts.read'),
+        ('admin', 'media.posts.write'),
+        ('admin', 'media.posts.review'),
+        ('admin', 'media.posts.publish'),
+        ('admin', 'media.files.read'),
+        ('admin', 'media.dashboard.read'),
+        ('media_writer', 'media.categories.read'),
+        ('media_writer', 'media.posts.read'),
+        ('media_writer', 'media.posts.write'),
+        ('media_writer', 'media.files.read'),
+        ('media_writer', 'media.dashboard.read'),
+        ('media_reviewer', 'media.categories.read'),
+        ('media_reviewer', 'media.posts.read'),
+        ('media_reviewer', 'media.posts.review'),
+        ('media_reviewer', 'media.files.read'),
+        ('media_reviewer', 'media.dashboard.read'),
+        ('media_publisher', 'media.categories.read'),
+        ('media_publisher', 'media.categories.write'),
+        ('media_publisher', 'media.posts.read'),
+        ('media_publisher', 'media.posts.publish'),
+        ('media_publisher', 'media.files.read'),
+        ('media_publisher', 'media.dashboard.read')
+    )
+    insert into auth.role_permissions (role_id, permission_id)
+    select r.id, p.id
+    from mapping m
+    join auth.roles r on r.name = m.role_name
+    join auth.permissions p on p.code = m.permission_code
+    on conflict do nothing
+  `);
+}
+
+async function logMediaAction(client, { postId, action, fromStatus, toStatus, note, actedBy, metadata }) {
+  await client.query(
+    `
+    insert into comms.media_post_actions
+      (post_id, action, from_status, to_status, note, acted_by, metadata)
+    values
+      ($1, $2, $3, $4, $5, $6, $7::jsonb)
+    `,
+    [
+      postId,
+      action,
+      fromStatus || null,
+      toStatus || null,
+      note || null,
+      actedBy || null,
+      JSON.stringify(metadata || {}),
+    ]
+  );
+}
+
+async function ensureUniqueMediaSlug(client, requestedSlug, fallbackTitle, excludePostId = null) {
+  const base = slugify(requestedSlug || fallbackTitle, "media-post");
+  let slug = base;
+
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    const checkResult = await client.query(
+      `
+      select 1
+      from comms.media_posts
+      where slug = $1
+        and ($2::uuid is null or id <> $2::uuid)
+      limit 1
+      `,
+      [slug, excludePostId]
+    );
+    if (checkResult.rowCount === 0) return slug;
+    slug = `${base}-${crypto.randomBytes(2).toString("hex")}`;
+  }
+
+  return `${base}-${Date.now().toString(36)}`;
+}
+
+async function getMediaImageFilesByIds(client, fileIds = []) {
+  const normalizedIds = normalizeUuidArray(fileIds);
+  if (normalizedIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await client.query(
+    `
+    select id, mime_type, original_name
+    from files.file_objects
+    where id = any($1::uuid[])
+    `,
+    [normalizedIds]
+  );
+  const fileMap = new Map(result.rows.map((row) => [row.id, row]));
+
+  if (fileMap.size !== normalizedIds.length) {
+    const error = new Error("Some selected files are missing.");
+    error.status = 400;
+    throw error;
+  }
+
+  for (const fileId of normalizedIds) {
+    const fileRow = fileMap.get(fileId);
+    if (!isLikelyImageFile(fileRow)) {
+      const error = new Error("Only image files are allowed for media posts.");
+      error.status = 400;
+      throw error;
+    }
+  }
+
+  return fileMap;
+}
+
+async function syncMediaPostFileLinks(client, { postId, coverFileId, galleryFileIds }) {
+  const normalizedCoverId = normalizeString(coverFileId);
+  const normalizedGalleryIds = normalizeUuidArray(galleryFileIds);
+
+  await client.query(
+    `
+    delete from files.file_links
+    where entity_type = 'media_post'
+      and entity_id = $1
+    `,
+    [postId]
+  );
+
+  const linkRows = [];
+  const seen = new Set();
+  if (normalizedCoverId && isValidUuid(normalizedCoverId) && !seen.has(normalizedCoverId)) {
+    seen.add(normalizedCoverId);
+    linkRows.push({ fileId: normalizedCoverId, note: "cover_image" });
+  }
+  for (const fileId of normalizedGalleryIds) {
+    if (seen.has(fileId)) continue;
+    seen.add(fileId);
+    linkRows.push({ fileId, note: "gallery_image" });
+  }
+
+  for (const link of linkRows) {
+    await client.query(
+      `
+      insert into files.file_links (file_id, entity_type, entity_id, note)
+      values ($1, 'media_post', $2, $3)
+      `,
+      [link.fileId, postId, link.note]
+    );
+  }
+}
+
 app.get("/api/health", async (req, res) => {
   try {
     const result = await pool.query("select 1 as ok");
     return res.json({ ok: true, db: result.rows[0]?.ok === 1 });
-  } catch (error) {
+  } catch (_error) {
     return res.status(500).json({ ok: false });
   }
 });
@@ -797,7 +1311,7 @@ app.post("/api/admin/candidates", requireAuth, requireRole(["admin"]), async (re
 
     const normalizedUsername =
       normalizeString(username) ||
-      normalizeString(candidateNo)?.toLowerCase().replace(/[^a-z0-9_\-]/g, "_");
+      normalizeString(candidateNo)?.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
     const normalizedPassword = normalizeString(password) || "candidate123";
 
     await client.query("begin");
@@ -4341,7 +4855,7 @@ app.put(
       const note = normalizeString(req.body?.note);
 
       if (req.body?.priority !== undefined && parsedPriority === null) {
-        return res.status(400).json({ message: "قيمة الأولوية غير صالحة." });
+        return res.status(400).json({ message: "Invalid priority value." });
       }
 
       await client.query("begin");
@@ -4362,7 +4876,7 @@ app.put(
 
       if (updateResult.rowCount === 0) {
         await client.query("rollback");
-        return res.status(404).json({ message: "الطلب غير موجود." });
+        return res.status(404).json({ message: "Request not found." });
       }
 
       await client.query(
@@ -4393,7 +4907,7 @@ app.put(
     } catch (error) {
       await client.query("rollback");
       console.error("Workflow assign error:", error);
-      return res.status(500).json({ message: "تعذر تحديث التعيين." });
+      return res.status(500).json({ message: "Failed to update assignment." });
     } finally {
       client.release();
     }
@@ -4499,10 +5013,1589 @@ app.put(
   }
 );
 
+app.get("/api/media/home", async (req, res) => {
+  try {
+    await ensureMediaCenterSchema();
+
+    const [postsResult, categoriesResult, eventsResult, announcementsResult] = await Promise.all([
+      pool.query(
+        `
+        select
+          mp.id,
+          mp.category_id,
+          mc.slug as category_slug,
+          mc.name_ar as category_name,
+          mp.title,
+          mp.slug,
+          coalesce(mp.summary, left(mp.body, 240)) as summary,
+          mp.body,
+          mp.cover_image_url,
+          mp.cover_file_id,
+          mp.gallery,
+          mp.tags,
+          mp.post_type,
+          mp.audience,
+          mp.status,
+          mp.is_pinned,
+          mp.is_featured,
+          mp.event_at,
+          mp.location,
+          mp.views_count,
+          mp.publish_starts_at,
+          mp.publish_ends_at,
+          mp.published_at,
+          mp.created_at,
+          mp.updated_at,
+          mp.created_by,
+          mp.approved_by,
+          cp.username as created_by_name,
+          ap.username as approved_by_name,
+          mp.decision_note
+        from comms.media_posts mp
+        left join comms.media_categories mc on mc.id = mp.category_id
+        left join auth.users cp on cp.id = mp.created_by
+        left join auth.users ap on ap.id = mp.approved_by
+        where mp.status = 'published'
+          and mp.audience = 'public'
+          and (mp.publish_starts_at is null or mp.publish_starts_at <= now())
+          and (mp.publish_ends_at is null or mp.publish_ends_at >= now())
+        order by mp.is_pinned desc, mp.is_featured desc, coalesce(mp.published_at, mp.created_at) desc
+        limit 10
+        `
+      ),
+      pool.query(
+        `
+        select
+          mc.id,
+          mc.slug,
+          mc.name_ar,
+          mc.name_en,
+          mc.description,
+          mc.sort_order,
+          count(mp.id)::int as post_count
+        from comms.media_categories mc
+        left join comms.media_posts mp
+          on mp.category_id = mc.id
+         and mp.status = 'published'
+         and mp.audience = 'public'
+         and (mp.publish_starts_at is null or mp.publish_starts_at <= now())
+         and (mp.publish_ends_at is null or mp.publish_ends_at >= now())
+        where mc.is_active = true
+        group by mc.id
+        order by mc.sort_order, mc.name_ar
+        `
+      ),
+      pool.query(
+        `
+        select
+          mp.id,
+          mp.title,
+          mp.slug,
+          mp.summary,
+          mp.cover_image_url,
+          mp.cover_file_id,
+          mp.event_at,
+          mp.location,
+          mc.name_ar as category_name
+        from comms.media_posts mp
+        left join comms.media_categories mc on mc.id = mp.category_id
+        where mp.status = 'published'
+          and mp.audience = 'public'
+          and mp.post_type = 'event'
+          and mp.event_at is not null
+          and mp.event_at >= now()
+          and (mp.publish_starts_at is null or mp.publish_starts_at <= now())
+          and (mp.publish_ends_at is null or mp.publish_ends_at >= now())
+        order by mp.event_at asc
+        limit 6
+        `
+      ),
+      pool.query(
+        `
+        select
+          id,
+          title,
+          body,
+          priority,
+          published_at,
+          expires_at
+        from comms.announcements
+        where status = 'published'
+          and (published_at is null or published_at <= now())
+          and (expires_at is null or expires_at >= now())
+        order by priority desc, published_at desc nulls last
+        limit 4
+        `
+      ),
+    ]);
+
+    const posts = postsResult.rows.map(mapMediaPostRow);
+    const featured = posts[0] || null;
+
+    return res.json({
+      featured,
+      latest: posts.slice(1),
+      categories: categoriesResult.rows.map((row) => ({
+        id: row.id,
+        slug: row.slug,
+        nameAr: row.name_ar,
+        nameEn: row.name_en,
+        description: row.description,
+        sortOrder: row.sort_order,
+        postCount: Number(row.post_count || 0),
+      })),
+      events: eventsResult.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        slug: row.slug,
+        summary: row.summary,
+        coverImageUrl: normalizeString(row.cover_image_url) || buildMediaFilePublicUrl(row.cover_file_id),
+        eventAt: row.event_at,
+        location: row.location,
+        categoryName: row.category_name,
+      })),
+      announcements: announcementsResult.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        body: row.body,
+        priority: Number(row.priority || 0),
+        publishedAt: row.published_at,
+        expiresAt: row.expires_at,
+      })),
+    });
+  } catch (error) {
+    console.error("Media home error:", error);
+    return res.status(500).json({ message: "تعذر تحميل بيانات المركز الإعلامي." });
+  }
+});
+
+app.get("/api/media/posts", async (req, res) => {
+  try {
+    await ensureMediaCenterSchema();
+
+    const search = normalizeString(req.query.search)?.toLowerCase() || null;
+    const categoryId = normalizeString(req.query.category_id);
+    const categorySlug = normalizeString(req.query.category_slug);
+    const postType = normalizeMediaType(req.query.post_type);
+    const from = parseDateTime(req.query.from);
+    const to = parseDateTime(req.query.to);
+    const limit = Math.min(Math.max(parseInteger(req.query.limit) || 12, 1), 100);
+    const page = Math.max(parseInteger(req.query.page) || 1, 1);
+    const offset = (page - 1) * limit;
+
+    if (req.query.post_type !== undefined && postType === null) {
+      return res.status(400).json({ message: "نوع المحتوى غير صالح." });
+    }
+    if (req.query.from && !from) {
+      return res.status(400).json({ message: "تاريخ البداية غير صالح." });
+    }
+    if (req.query.to && !to) {
+      return res.status(400).json({ message: "تاريخ النهاية غير صالح." });
+    }
+
+    const conditions = [
+      `mp.status = 'published'`,
+      `mp.audience = 'public'`,
+      `(mp.publish_starts_at is null or mp.publish_starts_at <= now())`,
+      `(mp.publish_ends_at is null or mp.publish_ends_at >= now())`,
+    ];
+    const values = [];
+    let index = 1;
+
+    if (search) {
+      conditions.push(
+        `(lower(mp.title) like $${index}
+          or lower(coalesce(mp.summary, '')) like $${index}
+          or lower(coalesce(mp.body, '')) like $${index})`
+      );
+      values.push(`%${search}%`);
+      index += 1;
+    }
+
+    if (categoryId) {
+      conditions.push(`mp.category_id = $${index}`);
+      values.push(categoryId);
+      index += 1;
+    }
+
+    if (categorySlug) {
+      conditions.push(`mc.slug = $${index}`);
+      values.push(categorySlug);
+      index += 1;
+    }
+
+    if (postType) {
+      conditions.push(`mp.post_type = $${index}`);
+      values.push(postType);
+      index += 1;
+    }
+
+    if (from) {
+      conditions.push(`coalesce(mp.published_at, mp.created_at) >= $${index}`);
+      values.push(from);
+      index += 1;
+    }
+
+    if (to) {
+      conditions.push(`coalesce(mp.published_at, mp.created_at) <= $${index}`);
+      values.push(to);
+      index += 1;
+    }
+
+    const whereClause = `where ${conditions.join(" and ")}`;
+    const result = await pool.query(
+      `
+      select
+        mp.id,
+        mp.category_id,
+        mc.slug as category_slug,
+        mc.name_ar as category_name,
+        mp.title,
+        mp.slug,
+        coalesce(mp.summary, left(mp.body, 240)) as summary,
+        mp.body,
+        mp.cover_image_url,
+        mp.cover_file_id,
+        mp.gallery,
+        mp.tags,
+        mp.post_type,
+        mp.audience,
+        mp.status,
+        mp.is_pinned,
+        mp.is_featured,
+        mp.event_at,
+        mp.location,
+        mp.views_count,
+        mp.publish_starts_at,
+        mp.publish_ends_at,
+        mp.published_at,
+        mp.created_at,
+        mp.updated_at,
+        mp.created_by,
+        mp.approved_by,
+        cp.username as created_by_name,
+        ap.username as approved_by_name,
+        mp.decision_note,
+        count(*) over()::int as total_count
+      from comms.media_posts mp
+      left join comms.media_categories mc on mc.id = mp.category_id
+      left join auth.users cp on cp.id = mp.created_by
+      left join auth.users ap on ap.id = mp.approved_by
+      ${whereClause}
+      order by mp.is_pinned desc, coalesce(mp.published_at, mp.created_at) desc
+      limit $${index} offset $${index + 1}
+      `,
+      [...values, limit, offset]
+    );
+
+    return res.json({
+      rows: result.rows.map(mapMediaPostRow),
+      total: Number(result.rows[0]?.total_count || 0),
+      page,
+      limit,
+    });
+  } catch (error) {
+    console.error("Media posts error:", error);
+    return res.status(500).json({ message: "تعذر تحميل الأخبار." });
+  }
+});
+
+app.get("/api/media/files/:id", async (req, res) => {
+  try {
+    await ensureMediaCenterSchema();
+    const fileId = normalizeString(req.params.id);
+    if (!fileId || !isValidUuid(fileId)) {
+      return res.status(400).json({ message: "Invalid media file id." });
+    }
+
+    const result = await pool.query(
+      `
+      select
+        fo.id,
+        fo.storage_key,
+        fo.original_name,
+        fo.mime_type,
+        fo.visibility,
+        max(
+          case
+            when mp.status = 'published'
+             and mp.audience = 'public'
+             and (mp.publish_starts_at is null or mp.publish_starts_at <= now())
+             and (mp.publish_ends_at is null or mp.publish_ends_at >= now())
+            then 1 else 0
+          end
+        ) as linked_public_post
+      from files.file_objects fo
+      left join files.file_links fl
+        on fl.file_id = fo.id
+       and fl.entity_type = 'media_post'
+      left join comms.media_posts mp
+        on mp.id = fl.entity_id
+      where fo.id = $1
+      group by fo.id
+      `,
+      [fileId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Media file not found." });
+    }
+
+    const row = result.rows[0];
+    const isPublic = row.visibility === "public";
+    const isLinkedToPublicPost = Number(row.linked_public_post || 0) > 0;
+    if (!isPublic && !isLinkedToPublicPost) {
+      return res.status(404).json({ message: "Media file not available." });
+    }
+
+    if (!String(row.storage_key).startsWith("uploads/")) {
+      return res.status(404).json({ message: "Media file content not found." });
+    }
+
+    const relativePath = String(row.storage_key).replace(/^uploads\//, "");
+    const absolutePath = path.resolve(uploadsDir, relativePath);
+    const fileBuffer = await fs.readFile(absolutePath);
+
+    res.setHeader("Content-Type", row.mime_type || "application/octet-stream");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${sanitizeFilename(row.original_name || "media-file")}"`
+    );
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    return res.send(fileBuffer);
+  } catch (error) {
+    console.error("Public media file error:", error);
+    return res.status(500).json({ message: "Failed to load media file." });
+  }
+});
+
+app.get("/api/media/posts/:id", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureMediaCenterSchema();
+
+    const identifier = normalizeString(req.params.id);
+    if (!identifier) {
+      return res.status(400).json({ message: "معرّف الخبر مطلوب." });
+    }
+
+    await client.query("begin");
+    const touchResult = await client.query(
+      `
+      update comms.media_posts
+      set views_count = views_count + 1
+      where (id::text = $1 or slug = $1)
+        and status = 'published'
+        and audience = 'public'
+        and (publish_starts_at is null or publish_starts_at <= now())
+        and (publish_ends_at is null or publish_ends_at >= now())
+      returning id, category_id
+      `,
+      [identifier]
+    );
+
+    if (touchResult.rowCount === 0) {
+      await client.query("rollback");
+      return res.status(404).json({ message: "الخبر غير موجود." });
+    }
+
+    const postId = touchResult.rows[0].id;
+    const categoryId = touchResult.rows[0].category_id;
+
+    const postResult = await client.query(
+      `
+      select
+        mp.id,
+        mp.category_id,
+        mc.slug as category_slug,
+        mc.name_ar as category_name,
+        mp.title,
+        mp.slug,
+        coalesce(mp.summary, left(mp.body, 240)) as summary,
+        mp.body,
+        mp.cover_image_url,
+        mp.cover_file_id,
+        mp.gallery,
+        mp.tags,
+        mp.post_type,
+        mp.audience,
+        mp.status,
+        mp.is_pinned,
+        mp.is_featured,
+        mp.event_at,
+        mp.location,
+        mp.views_count,
+        mp.publish_starts_at,
+        mp.publish_ends_at,
+        mp.published_at,
+        mp.created_at,
+        mp.updated_at,
+        mp.created_by,
+        mp.approved_by,
+        cp.username as created_by_name,
+        ap.username as approved_by_name,
+        mp.decision_note
+      from comms.media_posts mp
+      left join comms.media_categories mc on mc.id = mp.category_id
+      left join auth.users cp on cp.id = mp.created_by
+      left join auth.users ap on ap.id = mp.approved_by
+      where mp.id = $1
+      `,
+      [postId]
+    );
+
+    const relatedResult = await client.query(
+      `
+      select
+        mp.id,
+        mp.title,
+        mp.slug,
+        coalesce(mp.summary, left(mp.body, 200)) as summary,
+        mp.cover_image_url,
+        mp.cover_file_id,
+        mp.published_at,
+        mc.name_ar as category_name
+      from comms.media_posts mp
+      left join comms.media_categories mc on mc.id = mp.category_id
+      where mp.id <> $1
+        and ($2::uuid is null or mp.category_id = $2::uuid)
+        and mp.status = 'published'
+        and mp.audience = 'public'
+        and (mp.publish_starts_at is null or mp.publish_starts_at <= now())
+        and (mp.publish_ends_at is null or mp.publish_ends_at >= now())
+      order by coalesce(mp.published_at, mp.created_at) desc
+      limit 4
+      `,
+      [postId, categoryId]
+    );
+
+    await client.query("commit");
+
+    return res.json({
+      post: mapMediaPostRow(postResult.rows[0]),
+      related: relatedResult.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        slug: row.slug,
+        summary: row.summary,
+        coverImageUrl: normalizeString(row.cover_image_url) || buildMediaFilePublicUrl(row.cover_file_id),
+        publishedAt: row.published_at,
+        categoryName: row.category_name,
+      })),
+    });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Media post detail error:", error);
+    return res.status(500).json({ message: "تعذر تحميل الخبر." });
+  } finally {
+    client.release();
+  }
+});
+
+app.get(
+  "/api/admin/media/categories",
+  requireAuth,
+  requireRole(MEDIA_ROLES),
+  async (req, res) => {
+    try {
+      await ensureMediaCenterSchema();
+      const result = await pool.query(
+        `
+        select id, slug, name_ar, name_en, description, sort_order, is_active, created_at, updated_at
+        from comms.media_categories
+        order by sort_order, name_ar
+        `
+      );
+      return res.json({
+        rows: result.rows.map((row) => ({
+          id: row.id,
+          slug: row.slug,
+          nameAr: row.name_ar,
+          nameEn: row.name_en,
+          description: row.description,
+          sortOrder: row.sort_order,
+          isActive: row.is_active,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })),
+      });
+    } catch (error) {
+      console.error("Media categories error:", error);
+      return res.status(500).json({ message: "تعذر تحميل تصنيفات المركز الإعلامي." });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/media/categories",
+  requireAuth,
+  requireRole(MEDIA_PUBLISHER_ROLES),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureMediaCenterSchema();
+      const nameAr = normalizeString(req.body?.nameAr);
+      const nameEn = normalizeString(req.body?.nameEn);
+      const description = normalizeString(req.body?.description);
+      const sortOrder = parseInteger(req.body?.sortOrder) ?? 0;
+      const parsedIsActive = parseBoolean(req.body?.isActive);
+      const isActive = parsedIsActive === null ? true : parsedIsActive;
+      const slugInput = normalizeString(req.body?.slug);
+
+      if (!nameAr) {
+        return res.status(400).json({ message: "اسم التصنيف العربي مطلوب." });
+      }
+
+      await client.query("begin");
+      const slug = slugify(slugInput || nameAr, "media-category");
+      const insertResult = await client.query(
+        `
+        insert into comms.media_categories (
+          slug, name_ar, name_en, description, sort_order, is_active, created_by
+        )
+        values ($1, $2, $3, $4, $5, $6, $7)
+        returning id, slug, name_ar, name_en, description, sort_order, is_active, created_at, updated_at
+        `,
+        [slug, nameAr, nameEn, description, sortOrder, isActive, req.user.userId]
+      );
+      await client.query("commit");
+
+      const row = insertResult.rows[0];
+      return res.status(201).json({
+        category: {
+          id: row.id,
+          slug: row.slug,
+          nameAr: row.name_ar,
+          nameEn: row.name_en,
+          description: row.description,
+          sortOrder: row.sort_order,
+          isActive: row.is_active,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        },
+      });
+    } catch (error) {
+      await client.query("rollback");
+      if (error.code === "23505") {
+        return res.status(409).json({ message: "slug التصنيف موجود مسبقًا." });
+      }
+      console.error("Create media category error:", error);
+      return res.status(500).json({ message: "تعذر إنشاء التصنيف." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.get(
+  "/api/admin/media/files",
+  requireAuth,
+  requireRole(MEDIA_FILE_ACCESS_ROLES),
+  async (req, res) => {
+    try {
+      await ensureMediaCenterSchema();
+      const search = normalizeString(req.query.search)?.toLowerCase() || null;
+      const limit = Math.min(Math.max(parseInteger(req.query.limit) || 100, 1), 300);
+      const offset = Math.max(parseInteger(req.query.offset) || 0, 0);
+
+      const conditions = [
+        `(coalesce(lower(fo.mime_type), '') like 'image/%' or lower(coalesce(fo.original_name, '')) ~ '\\.(png|jpe?g|gif|webp|bmp|svg|avif)$')`,
+      ];
+      const values = [];
+      let index = 1;
+
+      if (search) {
+        conditions.push(
+          `(lower(coalesce(fo.original_name, '')) like $${index}
+            or lower(coalesce(fo.storage_key, '')) like $${index})`
+        );
+        values.push(`%${search}%`);
+        index += 1;
+      }
+
+      const whereClause = conditions.length ? `where ${conditions.join(" and ")}` : "";
+      const result = await pool.query(
+        `
+        select
+          fo.id,
+          fo.original_name,
+          fo.mime_type,
+          fo.size_bytes,
+          fo.visibility,
+          fo.uploaded_at,
+          u.username as uploaded_by,
+          count(fl.id) filter (where fl.entity_type = 'media_post')::int as media_links_count
+        from files.file_objects fo
+        left join auth.users u on u.id = fo.uploaded_by
+        left join files.file_links fl on fl.file_id = fo.id
+        ${whereClause}
+        group by fo.id, u.username
+        order by fo.uploaded_at desc
+        limit $${index} offset $${index + 1}
+        `,
+        [...values, limit, offset]
+      );
+
+      return res.json({
+        rows: result.rows.map((row) => ({
+          id: row.id,
+          originalName: row.original_name,
+          mimeType: row.mime_type,
+          sizeBytes: Number(row.size_bytes || 0),
+          visibility: row.visibility,
+          uploadedAt: row.uploaded_at,
+          uploadedBy: row.uploaded_by,
+          mediaLinksCount: Number(row.media_links_count || 0),
+          publicUrl: buildMediaFilePublicUrl(row.id),
+          downloadUrl: `/api/upload/files/${row.id}/download`,
+        })),
+      });
+    } catch (error) {
+      console.error("Admin media files error:", error);
+      return res.status(500).json({ message: "Failed to load media files." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/media/posts",
+  requireAuth,
+  requireRole(MEDIA_ROLES),
+  async (req, res) => {
+    try {
+      await ensureMediaCenterSchema();
+
+      const search = normalizeString(req.query.search)?.toLowerCase() || null;
+      const status = normalizeMediaStatus(req.query.status);
+      const categoryId = normalizeString(req.query.category_id);
+      const postType = normalizeMediaType(req.query.post_type);
+      const audience = normalizeMediaAudience(req.query.audience);
+      const limit = Math.min(Math.max(parseInteger(req.query.limit) || 20, 1), 200);
+      const offset = Math.max(parseInteger(req.query.offset) || 0, 0);
+
+      if (req.query.status !== undefined && status === null) {
+        return res.status(400).json({ message: "حالة النشر غير صالحة." });
+      }
+      if (req.query.post_type !== undefined && postType === null) {
+        return res.status(400).json({ message: "نوع المحتوى غير صالح." });
+      }
+      if (req.query.audience !== undefined && audience === null) {
+        return res.status(400).json({ message: "نوع الجمهور غير صالح." });
+      }
+
+      const values = [];
+      const conditions = [];
+      let index = 1;
+      const userRoles = req.user?.roles || [];
+      const isWriterOnly =
+        hasAnyRole(userRoles, ["media_writer"]) &&
+        !hasAnyRole(userRoles, ["admin", "media_reviewer", "media_publisher"]);
+
+      if (search) {
+        conditions.push(
+          `(lower(mp.title) like $${index}
+            or lower(coalesce(mp.summary, '')) like $${index}
+            or lower(coalesce(mp.body, '')) like $${index})`
+        );
+        values.push(`%${search}%`);
+        index += 1;
+      }
+      if (status) {
+        conditions.push(`mp.status = $${index}`);
+        values.push(status);
+        index += 1;
+      }
+      if (categoryId) {
+        conditions.push(`mp.category_id = $${index}`);
+        values.push(categoryId);
+        index += 1;
+      }
+      if (postType) {
+        conditions.push(`mp.post_type = $${index}`);
+        values.push(postType);
+        index += 1;
+      }
+      if (audience) {
+        conditions.push(`mp.audience = $${index}`);
+        values.push(audience);
+        index += 1;
+      }
+      if (isWriterOnly) {
+        conditions.push(`mp.created_by = $${index}`);
+        values.push(req.user.userId);
+        index += 1;
+      }
+
+      const whereClause = conditions.length ? `where ${conditions.join(" and ")}` : "";
+      const result = await pool.query(
+        `
+        select
+          mp.id,
+          mp.category_id,
+          mc.slug as category_slug,
+          mc.name_ar as category_name,
+          mp.title,
+          mp.slug,
+          coalesce(mp.summary, left(mp.body, 240)) as summary,
+          mp.body,
+          mp.cover_image_url,
+          mp.cover_file_id,
+          mp.gallery,
+          mp.tags,
+          mp.post_type,
+          mp.audience,
+          mp.status,
+          mp.is_pinned,
+          mp.is_featured,
+          mp.event_at,
+          mp.location,
+          mp.views_count,
+          mp.publish_starts_at,
+          mp.publish_ends_at,
+          mp.published_at,
+          mp.created_at,
+          mp.updated_at,
+          mp.created_by,
+          mp.approved_by,
+          cp.username as created_by_name,
+          ap.username as approved_by_name,
+          mp.decision_note,
+          count(*) over()::int as total_count
+        from comms.media_posts mp
+        left join comms.media_categories mc on mc.id = mp.category_id
+        left join auth.users cp on cp.id = mp.created_by
+        left join auth.users ap on ap.id = mp.approved_by
+        ${whereClause}
+        order by mp.updated_at desc
+        limit $${index} offset $${index + 1}
+        `,
+        [...values, limit, offset]
+      );
+
+      return res.json({
+        rows: result.rows.map(mapMediaPostRow),
+        total: Number(result.rows[0]?.total_count || 0),
+      });
+    } catch (error) {
+      console.error("Admin media posts list error:", error);
+      return res.status(500).json({ message: "تعذر تحميل منشورات المركز الإعلامي." });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/media/dashboard",
+  requireAuth,
+  requireRole(MEDIA_ROLES),
+  async (req, res) => {
+    try {
+      await ensureMediaCenterSchema();
+      const status = normalizeMediaStatus(req.query.status);
+      const categoryId = normalizeString(req.query.category_id);
+
+      if (req.query.status !== undefined && status === null) {
+        return res.status(400).json({ message: "Invalid status filter." });
+      }
+      if (categoryId && !isValidUuid(categoryId)) {
+        return res.status(400).json({ message: "Invalid category filter." });
+      }
+
+      const conditions = [];
+      const values = [];
+      let index = 1;
+
+      if (status) {
+        conditions.push(`mp.status = $${index}`);
+        values.push(status);
+        index += 1;
+      }
+      if (categoryId) {
+        conditions.push(`mp.category_id = $${index}`);
+        values.push(categoryId);
+        index += 1;
+      }
+
+      const whereClause = conditions.length ? `where ${conditions.join(" and ")}` : "";
+      const publishedConditions = [...conditions, `mp.published_at is not null`];
+      const publishedWhereClause = `where ${publishedConditions.join(" and ")}`;
+
+      const [summaryResult, topCategoryResult, weeklyResult, alertsResult] = await Promise.all([
+        pool.query(
+          `
+          select
+            count(*)::int as total_posts,
+            count(*) filter (where mp.status = 'published')::int as published_posts,
+            count(*) filter (where mp.status = 'in_review')::int as in_review_posts,
+            count(*) filter (where mp.status = 'draft')::int as draft_posts,
+            count(*) filter (where mp.created_at >= now() - interval '7 days')::int as created_last_7_days,
+            count(*) filter (where mp.published_at >= now() - interval '7 days')::int as published_last_7_days
+          from comms.media_posts mp
+          ${whereClause}
+          `,
+          values
+        ),
+        pool.query(
+          `
+          select
+            mc.id,
+            mc.name_ar,
+            count(mp.id)::int as post_count
+          from comms.media_posts mp
+          left join comms.media_categories mc on mc.id = mp.category_id
+          ${whereClause}
+          group by mc.id, mc.name_ar
+          order by post_count desc, mc.name_ar asc nulls last
+          limit 1
+          `,
+          values
+        ),
+        pool.query(
+          `
+          with week_series as (
+            select
+              generate_series(
+                date_trunc('week', now()) - interval '7 weeks',
+                date_trunc('week', now()),
+                interval '1 week'
+              ) as week_start
+          ),
+          created_weekly as (
+            select
+              date_trunc('week', mp.created_at) as week_start,
+              count(*)::int as created_count
+            from comms.media_posts mp
+            ${whereClause}
+            group by 1
+          ),
+          published_weekly as (
+            select
+              date_trunc('week', mp.published_at) as week_start,
+              count(*)::int as published_count
+            from comms.media_posts mp
+            ${publishedWhereClause}
+            group by 1
+          )
+          select
+            ws.week_start,
+            coalesce(cw.created_count, 0)::int as created_count,
+            coalesce(pw.published_count, 0)::int as published_count
+          from week_series ws
+          left join created_weekly cw on cw.week_start = ws.week_start
+          left join published_weekly pw on pw.week_start = ws.week_start
+          order by ws.week_start asc
+          `,
+          values
+        ),
+        pool.query(
+          `
+          select
+            count(*) filter (
+              where mp.status = 'in_review'
+                and mp.updated_at < now() - interval '72 hours'
+            )::int as stale_reviews,
+            count(*) filter (
+              where mp.status = 'draft'
+                and mp.created_at < now() - interval '14 days'
+            )::int as stale_drafts
+          from comms.media_posts mp
+          ${whereClause}
+          `,
+          values
+        ),
+      ]);
+
+      const summaryRow = summaryResult.rows[0] || {};
+      const totalPosts = Number(summaryRow.total_posts || 0);
+      const publishedPosts = Number(summaryRow.published_posts || 0);
+      const publishRate = totalPosts > 0 ? Number(((publishedPosts / totalPosts) * 100).toFixed(2)) : 0;
+
+      const alertsRow = alertsResult.rows[0] || {};
+      const staleReviews = Number(alertsRow.stale_reviews || 0);
+      const staleDrafts = Number(alertsRow.stale_drafts || 0);
+      const alerts = [];
+      if (staleReviews > 0) {
+        alerts.push({
+          code: "stale_reviews",
+          level: staleReviews >= 5 ? "high" : "medium",
+          message: `There are ${staleReviews} posts pending review for more than 72 hours.`,
+        });
+      }
+      if (staleDrafts > 0) {
+        alerts.push({
+          code: "stale_drafts",
+          level: staleDrafts >= 8 ? "medium" : "low",
+          message: `There are ${staleDrafts} old draft posts older than 14 days.`,
+        });
+      }
+
+      return res.json({
+        summary: {
+          totalPosts,
+          publishedPosts,
+          inReviewPosts: Number(summaryRow.in_review_posts || 0),
+          draftPosts: Number(summaryRow.draft_posts || 0),
+          createdLast7Days: Number(summaryRow.created_last_7_days || 0),
+          publishedLast7Days: Number(summaryRow.published_last_7_days || 0),
+          publishRate,
+        },
+        topCategory: topCategoryResult.rows[0]
+          ? {
+              id: topCategoryResult.rows[0].id,
+              nameAr: topCategoryResult.rows[0].name_ar,
+              postCount: Number(topCategoryResult.rows[0].post_count || 0),
+            }
+          : null,
+        weekly: weeklyResult.rows.map((row) => ({
+          weekStart: row.week_start,
+          createdCount: Number(row.created_count || 0),
+          publishedCount: Number(row.published_count || 0),
+        })),
+        alerts,
+      });
+    } catch (error) {
+      console.error("Admin media dashboard error:", error);
+      return res.status(500).json({ message: "Failed to load media dashboard." });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/media/posts",
+  requireAuth,
+  requireRole(MEDIA_EDITOR_ROLES),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureMediaCenterSchema();
+
+      const title = normalizeString(req.body?.title);
+      const summary = normalizeString(req.body?.summary);
+      const body = normalizeString(req.body?.body);
+      const categoryId = normalizeString(req.body?.categoryId);
+      const coverFileId = normalizeString(req.body?.coverFileId);
+      const coverImageUrl = normalizeString(req.body?.coverImageUrl);
+      const galleryFileIds = normalizeUuidArray(req.body?.galleryFileIds);
+      const tags = normalizeStringArray(req.body?.tags);
+      const gallery = normalizeGallery(req.body?.gallery);
+      const postType = normalizeMediaType(req.body?.postType);
+      const audience = normalizeMediaAudience(req.body?.audience);
+      const status = normalizeMediaStatus(req.body?.status);
+      const parsedPinned = parseBoolean(req.body?.isPinned);
+      const parsedFeatured = parseBoolean(req.body?.isFeatured);
+      const isPinned = parsedPinned === null ? false : parsedPinned;
+      const isFeatured = parsedFeatured === null ? false : parsedFeatured;
+      const eventAt = parseDateTime(req.body?.eventAt);
+      const location = normalizeString(req.body?.location);
+      const publishStartsAt = parseDateTime(req.body?.publishStartsAt);
+      const publishEndsAt = parseDateTime(req.body?.publishEndsAt);
+      const decisionNote = normalizeString(req.body?.decisionNote);
+      const userRoles = req.user?.roles || [];
+      const isAdmin = hasAnyRole(userRoles, ["admin"]);
+      const isPublisher = hasAnyRole(userRoles, ["media_publisher"]);
+      const isWriter = hasAnyRole(userRoles, ["media_writer"]);
+
+      if (!title || !body) {
+        return res.status(400).json({ message: "عنوان الخبر والمحتوى مطلوبان." });
+      }
+      if (req.body?.postType !== undefined && postType === null) {
+        return res.status(400).json({ message: "نوع المحتوى غير صالح." });
+      }
+      if (req.body?.audience !== undefined && audience === null) {
+        return res.status(400).json({ message: "نوع الجمهور غير صالح." });
+      }
+      if (req.body?.status !== undefined && status === null) {
+        return res.status(400).json({ message: "حالة النشر غير صالحة." });
+      }
+      if (req.body?.eventAt && !eventAt) {
+        return res.status(400).json({ message: "تاريخ الفعالية غير صالح." });
+      }
+      if (req.body?.publishStartsAt && !publishStartsAt) {
+        return res.status(400).json({ message: "تاريخ بداية النشر غير صالح." });
+      }
+      if (req.body?.publishEndsAt && !publishEndsAt) {
+        return res.status(400).json({ message: "تاريخ نهاية النشر غير صالح." });
+      }
+
+      if (coverFileId && !isValidUuid(coverFileId)) {
+        return res.status(400).json({ message: "Invalid cover file id." });
+      }
+      if (
+        !isAdmin &&
+        !isPublisher &&
+        isWriter &&
+        ["approved", "published", "archived"].includes(status || "draft")
+      ) {
+        return res.status(403).json({ message: "Writer role cannot set this publish status on creation." });
+      }
+
+      await client.query("begin");
+      await getMediaImageFilesByIds(client, [coverFileId, ...galleryFileIds].filter(Boolean));
+      const normalizedGallery = [...gallery];
+      const galleryFileIdSet = new Set(
+        normalizedGallery
+          .map((item) => normalizeString(item.fileId))
+          .filter((item) => item !== null)
+      );
+      for (const fileId of galleryFileIds) {
+        if (galleryFileIdSet.has(fileId)) continue;
+        normalizedGallery.push({
+          fileId,
+          url: buildMediaFilePublicUrl(fileId),
+        });
+        galleryFileIdSet.add(fileId);
+      }
+      const resolvedCoverImageUrl = coverFileId
+        ? buildMediaFilePublicUrl(coverFileId)
+        : coverImageUrl;
+
+      const slug = await ensureUniqueMediaSlug(client, req.body?.slug, title);
+      const insertStatus = status || "draft";
+      const publishAt = insertStatus === "published" ? new Date().toISOString() : null;
+      const approvedBy = ["approved", "published"].includes(insertStatus)
+        ? req.user.userId
+        : null;
+
+      const insertResult = await client.query(
+        `
+        insert into comms.media_posts (
+          category_id,
+          title,
+          slug,
+          summary,
+          body,
+          cover_image_url,
+          cover_file_id,
+          gallery,
+          tags,
+          post_type,
+          audience,
+          status,
+          is_pinned,
+          is_featured,
+          event_at,
+          location,
+          publish_starts_at,
+          publish_ends_at,
+          published_at,
+          created_by,
+          approved_by,
+          last_decision_at,
+          last_decision_by,
+          decision_note
+        )
+        values (
+          $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, $11, $12, $13, $14, $15,
+          $16, $17, $18, $19, $20, $21, now(), $20, $22
+        )
+        returning id
+        `,
+        [
+          categoryId,
+          title,
+          slug,
+          summary,
+          body,
+          resolvedCoverImageUrl,
+          coverFileId,
+          JSON.stringify(normalizedGallery),
+          tags,
+          postType || "news",
+          audience || "public",
+          insertStatus,
+          isPinned,
+          isFeatured,
+          eventAt,
+          location,
+          publishStartsAt,
+          publishEndsAt,
+          publishAt,
+          req.user.userId,
+          approvedBy,
+          decisionNote,
+        ]
+      );
+
+      const postId = insertResult.rows[0].id;
+      await syncMediaPostFileLinks(client, {
+        postId,
+        coverFileId,
+        galleryFileIds: Array.from(galleryFileIdSet),
+      });
+      await logMediaAction(client, {
+        postId,
+        action: "create_post",
+        fromStatus: null,
+        toStatus: insertStatus,
+        note: decisionNote,
+        actedBy: req.user.userId,
+        metadata: {
+          isPinned,
+          isFeatured,
+          coverFileId,
+          galleryFileIds: Array.from(galleryFileIdSet),
+        },
+      });
+
+      await client.query("commit");
+      return res.status(201).json({ id: postId });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Create media post error:", error);
+      return res.status(500).json({ message: "تعذر إنشاء الخبر." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.put(
+  "/api/admin/media/posts/:id",
+  requireAuth,
+  requireRole(MEDIA_EDITOR_ROLES),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureMediaCenterSchema();
+
+      const postId = normalizeString(req.params.id);
+      if (!postId) {
+        return res.status(400).json({ message: "معرّف الخبر مطلوب." });
+      }
+
+      const title = normalizeString(req.body?.title);
+      const summary = normalizeString(req.body?.summary);
+      const body = normalizeString(req.body?.body);
+      const categoryId = normalizeString(req.body?.categoryId);
+      const coverFileId = normalizeString(req.body?.coverFileId);
+      const coverImageUrl = normalizeString(req.body?.coverImageUrl);
+      const galleryFileIds = normalizeUuidArray(req.body?.galleryFileIds);
+      const tags = normalizeStringArray(req.body?.tags);
+      const gallery = normalizeGallery(req.body?.gallery);
+      const postType = normalizeMediaType(req.body?.postType);
+      const audience = normalizeMediaAudience(req.body?.audience);
+      const parsedPinned = parseBoolean(req.body?.isPinned);
+      const parsedFeatured = parseBoolean(req.body?.isFeatured);
+      const isPinned = parsedPinned === null ? false : parsedPinned;
+      const isFeatured = parsedFeatured === null ? false : parsedFeatured;
+      const eventAt = parseDateTime(req.body?.eventAt);
+      const location = normalizeString(req.body?.location);
+      const publishStartsAt = parseDateTime(req.body?.publishStartsAt);
+      const publishEndsAt = parseDateTime(req.body?.publishEndsAt);
+      const decisionNote = normalizeString(req.body?.decisionNote);
+      const userRoles = req.user?.roles || [];
+      const isAdmin = hasAnyRole(userRoles, ["admin"]);
+      const isPublisher = hasAnyRole(userRoles, ["media_publisher"]);
+      const isWriter = hasAnyRole(userRoles, ["media_writer"]);
+
+      if (!title || !body) {
+        return res.status(400).json({ message: "عنوان الخبر والمحتوى مطلوبان." });
+      }
+      if (req.body?.postType !== undefined && postType === null) {
+        return res.status(400).json({ message: "نوع المحتوى غير صالح." });
+      }
+      if (req.body?.audience !== undefined && audience === null) {
+        return res.status(400).json({ message: "نوع الجمهور غير صالح." });
+      }
+      if (req.body?.eventAt && !eventAt) {
+        return res.status(400).json({ message: "تاريخ الفعالية غير صالح." });
+      }
+      if (req.body?.publishStartsAt && !publishStartsAt) {
+        return res.status(400).json({ message: "تاريخ بداية النشر غير صالح." });
+      }
+      if (req.body?.publishEndsAt && !publishEndsAt) {
+        return res.status(400).json({ message: "تاريخ نهاية النشر غير صالح." });
+      }
+
+      if (coverFileId && !isValidUuid(coverFileId)) {
+        return res.status(400).json({ message: "Invalid cover file id." });
+      }
+
+      await client.query("begin");
+
+      const currentResult = await client.query(
+        `select id, status, created_by from comms.media_posts where id = $1`,
+        [postId]
+      );
+      if (currentResult.rowCount === 0) {
+        await client.query("rollback");
+        return res.status(404).json({ message: "الخبر غير موجود." });
+      }
+
+      const currentPost = currentResult.rows[0];
+      const isOwner = currentPost.created_by === req.user.userId;
+
+      if (!isAdmin && !isPublisher) {
+        if (!isWriter || !isOwner) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only the post owner can edit this item." });
+        }
+        if (["published", "archived"].includes(currentPost.status)) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Published or archived posts cannot be edited by writer role." });
+        }
+      }
+
+      await getMediaImageFilesByIds(client, [coverFileId, ...galleryFileIds].filter(Boolean));
+      const normalizedGallery = [...gallery];
+      const galleryFileIdSet = new Set(
+        normalizedGallery
+          .map((item) => normalizeString(item.fileId))
+          .filter((item) => item !== null)
+      );
+      for (const fileId of galleryFileIds) {
+        if (galleryFileIdSet.has(fileId)) continue;
+        normalizedGallery.push({
+          fileId,
+          url: buildMediaFilePublicUrl(fileId),
+        });
+        galleryFileIdSet.add(fileId);
+      }
+      const resolvedCoverImageUrl = coverFileId
+        ? buildMediaFilePublicUrl(coverFileId)
+        : coverImageUrl;
+
+      const slug = await ensureUniqueMediaSlug(client, req.body?.slug || title, title, postId);
+      await client.query(
+        `
+        update comms.media_posts
+        set
+          category_id = $2,
+          title = $3,
+          slug = $4,
+          summary = $5,
+          body = $6,
+          cover_image_url = $7,
+          cover_file_id = $8,
+          gallery = $9::jsonb,
+          tags = $10::text[],
+          post_type = $11,
+          audience = $12,
+          is_pinned = $13,
+          is_featured = $14,
+          event_at = $15,
+          location = $16,
+          publish_starts_at = $17,
+          publish_ends_at = $18,
+          decision_note = $19,
+          updated_at = now()
+        where id = $1
+        `,
+        [
+          postId,
+          categoryId,
+          title,
+          slug,
+          summary,
+          body,
+          resolvedCoverImageUrl,
+          coverFileId,
+          JSON.stringify(normalizedGallery),
+          tags,
+          postType || "news",
+          audience || "public",
+          isPinned,
+          isFeatured,
+          eventAt,
+          location,
+          publishStartsAt,
+          publishEndsAt,
+          decisionNote,
+        ]
+      );
+
+      await syncMediaPostFileLinks(client, {
+        postId,
+        coverFileId,
+        galleryFileIds: Array.from(galleryFileIdSet),
+      });
+
+      await logMediaAction(client, {
+        postId,
+        action: "update_post",
+        fromStatus: currentResult.rows[0].status,
+        toStatus: currentResult.rows[0].status,
+        note: decisionNote,
+        actedBy: req.user.userId,
+        metadata: {
+          isPinned,
+          isFeatured,
+          coverFileId,
+          galleryFileIds: Array.from(galleryFileIdSet),
+        },
+      });
+
+      await client.query("commit");
+      return res.json({ updated: true });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Update media post error:", error);
+      return res.status(500).json({ message: "تعذر تحديث الخبر." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.get(
+  "/api/admin/media/posts/:id/actions",
+  requireAuth,
+  requireRole(MEDIA_ROLES),
+  async (req, res) => {
+    try {
+      await ensureMediaCenterSchema();
+      const postId = normalizeString(req.params.id);
+      const postResult = await pool.query(
+        `select id, created_by from comms.media_posts where id = $1`,
+        [postId]
+      );
+      if (postResult.rowCount === 0) {
+        return res.status(404).json({ message: "Media post not found." });
+      }
+      const userRoles = req.user?.roles || [];
+      const isWriterOnly =
+        hasAnyRole(userRoles, ["media_writer"]) &&
+        !hasAnyRole(userRoles, ["admin", "media_reviewer", "media_publisher"]);
+      if (isWriterOnly && postResult.rows[0].created_by !== req.user.userId) {
+        return res.status(403).json({ message: "You are not allowed to read actions for this post." });
+      }
+      const result = await pool.query(
+        `
+        select
+          a.id,
+          a.action,
+          a.from_status,
+          a.to_status,
+          a.note,
+          a.acted_at,
+          a.metadata,
+          u.username as acted_by_username
+        from comms.media_post_actions a
+        left join auth.users u on u.id = a.acted_by
+        where a.post_id = $1
+        order by a.acted_at desc
+        `,
+        [postId]
+      );
+      return res.json({ rows: result.rows });
+    } catch (error) {
+      console.error("Media post actions error:", error);
+      return res.status(500).json({ message: "تعذر تحميل سجل إجراءات الخبر." });
+    }
+  }
+);
+
+app.put(
+  "/api/admin/media/posts/:id/status",
+  requireAuth,
+  requireRole(MEDIA_ROLES),
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      await ensureMediaCenterSchema();
+
+      const postId = normalizeString(req.params.id);
+      const action = normalizeString(req.body?.action)?.toLowerCase();
+      const note = normalizeString(req.body?.note);
+
+      if (!postId || !action) {
+        return res.status(400).json({ message: "المعرف والإجراء مطلوبان." });
+      }
+
+      await client.query("begin");
+      const currentResult = await client.query(
+        `select id, status, is_pinned, is_featured, created_by from comms.media_posts where id = $1`,
+        [postId]
+      );
+      if (currentResult.rowCount === 0) {
+        await client.query("rollback");
+        return res.status(404).json({ message: "الخبر غير موجود." });
+      }
+
+      const current = currentResult.rows[0];
+      const fromStatus = current.status;
+      let nextStatus = fromStatus;
+      let updateFlags = {};
+      const userRoles = req.user?.roles || [];
+      const isAdmin = hasAnyRole(userRoles, ["admin"]);
+      const isWriter = hasAnyRole(userRoles, ["media_writer"]);
+      const isReviewer = hasAnyRole(userRoles, ["media_reviewer"]);
+      const isPublisher = hasAnyRole(userRoles, ["media_publisher"]);
+      const isOwner = current.created_by === req.user.userId;
+
+      if (action === "submit") {
+        if (!isAdmin && !isPublisher && !(isWriter && isOwner)) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "You are not allowed to submit this post for review." });
+        }
+        if (!["draft", "rejected"].includes(fromStatus)) {
+          await client.query("rollback");
+          return res.status(400).json({ message: "لا يمكن إرسال الخبر للمراجعة من حالته الحالية." });
+        }
+        nextStatus = "in_review";
+      } else if (action === "approve") {
+        if (!isAdmin && !isReviewer) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only reviewer role can approve media posts." });
+        }
+        if (fromStatus !== "in_review") {
+          await client.query("rollback");
+          return res.status(400).json({ message: "الاعتماد متاح فقط للخبر قيد المراجعة." });
+        }
+        nextStatus = "approved";
+      } else if (action === "reject") {
+        if (!isAdmin && !isReviewer) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only reviewer role can reject media posts." });
+        }
+        if (!["in_review", "approved"].includes(fromStatus)) {
+          await client.query("rollback");
+          return res.status(400).json({ message: "الرفض غير متاح في الحالة الحالية." });
+        }
+        nextStatus = "rejected";
+      } else if (action === "publish") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can publish media posts." });
+        }
+        if (!["approved", "archived"].includes(fromStatus)) {
+          await client.query("rollback");
+          return res.status(400).json({ message: "النشر يتطلب اعتمادًا مسبقًا." });
+        }
+        nextStatus = "published";
+      } else if (action === "archive") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can archive media posts." });
+        }
+        if (fromStatus !== "published") {
+          await client.query("rollback");
+          return res.status(400).json({ message: "الأرشفة متاحة فقط للمحتوى المنشور." });
+        }
+        nextStatus = "archived";
+      } else if (action === "return_to_draft") {
+        if (!isAdmin && !isPublisher && !isReviewer && !(isWriter && isOwner)) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "You are not allowed to move this post back to draft." });
+        }
+        if (fromStatus === "published") {
+          await client.query("rollback");
+          return res.status(400).json({ message: "لا يمكن إعادة المحتوى المنشور إلى مسودة مباشرة." });
+        }
+        nextStatus = "draft";
+      } else if (action === "pin") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can pin media posts." });
+        }
+        updateFlags = { isPinned: true };
+      } else if (action === "unpin") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can unpin media posts." });
+        }
+        updateFlags = { isPinned: false };
+      } else if (action === "feature") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can feature media posts." });
+        }
+        updateFlags = { isFeatured: true };
+      } else if (action === "unfeature") {
+        if (!isAdmin && !isPublisher) {
+          await client.query("rollback");
+          return res.status(403).json({ message: "Only publisher role can unfeature media posts." });
+        }
+        updateFlags = { isFeatured: false };
+      } else {
+        await client.query("rollback");
+        return res.status(400).json({ message: "الإجراء غير مدعوم." });
+      }
+
+      const setClauses = [
+        `updated_at = now()`,
+        `last_decision_at = now()`,
+        `last_decision_by = $2`,
+      ];
+      const values = [postId, req.user.userId];
+      let valueIndex = values.length + 1;
+
+      if (nextStatus !== fromStatus) {
+        setClauses.push(`status = $${valueIndex}`);
+        values.push(nextStatus);
+        valueIndex += 1;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(updateFlags, "isPinned")) {
+        setClauses.push(`is_pinned = $${valueIndex}`);
+        values.push(updateFlags.isPinned);
+        valueIndex += 1;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(updateFlags, "isFeatured")) {
+        setClauses.push(`is_featured = $${valueIndex}`);
+        values.push(updateFlags.isFeatured);
+        valueIndex += 1;
+      }
+
+      if (nextStatus === "approved" || nextStatus === "published") {
+        setClauses.push(`approved_by = $${valueIndex}`);
+        values.push(req.user.userId);
+        valueIndex += 1;
+      }
+
+      if (nextStatus === "published") {
+        setClauses.push(`published_at = coalesce(published_at, now())`);
+      }
+
+      if (note) {
+        setClauses.push(`decision_note = $${valueIndex}`);
+        values.push(note);
+      }
+
+      await client.query(
+        `
+        update comms.media_posts
+        set ${setClauses.join(", ")}
+        where id = $1
+        `,
+        values
+      );
+
+      await logMediaAction(client, {
+        postId,
+        action,
+        fromStatus,
+        toStatus: nextStatus,
+        note,
+        actedBy: req.user.userId,
+        metadata: updateFlags,
+      });
+
+      await client.query("commit");
+      return res.json({
+        updated: true,
+        status: nextStatus,
+        isPinned: Object.prototype.hasOwnProperty.call(updateFlags, "isPinned")
+          ? updateFlags.isPinned
+          : current.is_pinned,
+        isFeatured: Object.prototype.hasOwnProperty.call(updateFlags, "isFeatured")
+          ? updateFlags.isFeatured
+          : current.is_featured,
+      });
+    } catch (error) {
+      await client.query("rollback");
+      console.error("Update media status error:", error);
+      return res.status(500).json({ message: "تعذر تحديث حالة النشر." });
+    } finally {
+      client.release();
+    }
+  }
+);
+
 app.get(
   "/api/upload/files",
   requireAuth,
-  requireRole(["uploader", "admin"]),
+  requireRole(MEDIA_FILE_ACCESS_ROLES),
   async (req, res) => {
     try {
       const search = normalizeString(req.query.search)?.toLowerCase() || null;
@@ -4567,7 +6660,7 @@ app.get(
 app.post(
   "/api/upload/files",
   requireAuth,
-  requireRole(["uploader", "admin"]),
+  requireRole(["uploader", "admin", "media_writer", "media_publisher"]),
   async (req, res) => {
     const client = await pool.connect();
     try {
@@ -4659,7 +6752,7 @@ app.post(
 app.get(
   "/api/upload/files/:id/download",
   requireAuth,
-  requireRole(["uploader", "admin"]),
+  requireRole(MEDIA_FILE_ACCESS_ROLES),
   async (req, res) => {
     try {
       const result = await pool.query(
@@ -6393,6 +8486,24 @@ app.post("/api/requests", requireAuth, async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
+
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(
+      `Port ${port} is already in use. Another API process is likely running. Stop it first or change PORT in .env.`
+    );
+    return process.exit(1);
+  }
+  if (error.code === "EACCES") {
+    console.error(
+      `Port ${port} is blocked by system policy on this machine. Choose another port in .env (for example 4300 or 4400).`
+    );
+    return process.exit(1);
+  }
+  console.error("Server startup error:", error);
+  process.exit(1);
+});
+

@@ -7,7 +7,7 @@ const navItems = [
   { to: "/", label: "الرئيسية" },
   { to: "/about", label: "عن الكلية" },
   { to: "/academics", label: "الشؤون الأكاديمية" },
-  { to: "/services", label: "خدمات الطلبة" },
+  { to: "/services", label: "الخدمات" },
   { to: "/research", label: "البحث العلمي" },
   { to: "/media", label: "المركز الإعلامي" },
 ];
@@ -35,7 +35,7 @@ export default function Navbar() {
         <button
           className={`nav-toggle ${isOpen ? "open" : ""}`}
           onClick={() => setIsOpen((prev) => !prev)}
-          aria-label="Toggle navigation"
+          aria-label="تبديل قائمة التنقل"
           aria-expanded={isOpen}
         >
           <span />
@@ -49,9 +49,7 @@ export default function Navbar() {
           <li key={item.to}>
             <NavLink
               to={item.to}
-              className={({ isActive }) =>
-                `nav-link ${isActive ? "active" : ""}`
-              }
+              className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
               onClick={() => setIsOpen(false)}
             >
               {item.label}

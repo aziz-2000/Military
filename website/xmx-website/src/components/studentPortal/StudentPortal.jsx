@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import "./StudentPortal.css";
 import logo from "../../assets/logo.JPG";
@@ -115,29 +115,7 @@ export default function StudentPortal() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!authToken) return;
-    if (userRoles.length === 0) {
-      loadUserProfile();
-      return;
-    }
-    if (userRoles.includes("candidate")) {
-      loadOverview();
-    }
-  }, [authToken, userRoles]);
-
-  useEffect(() => {
-    if (!isLoggedIn || userRoles.length === 0) return;
-    if (userRoles.includes("candidate")) return;
-    const redirectPath = getRedirectPathForRoles(userRoles);
-    if (redirectPath) {
-      navigate(redirectPath, { replace: true });
-    }
-  }, [isLoggedIn, userRoles, navigate]);
-
-  const rolesLabel = useMemo(() => userRoles.join(", "), [userRoles]);
-
-  const loadUserProfile = async () => {
+  const loadUserProfile = useCallback(async () => {
     try {
       const data = await apiRequest("/auth/me", { token: authToken });
       const roles = data?.user?.roles || [];
@@ -148,9 +126,9 @@ export default function StudentPortal() {
         handleLogout();
       }
     }
-  };
+  }, [authToken]);
 
-  const loadOverview = async () => {
+  const loadOverview = useCallback(async () => {
     setLoading(true);
     setError("");
 
@@ -165,7 +143,29 @@ export default function StudentPortal() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [authToken]);
+
+  useEffect(() => {
+    if (!authToken) return;
+    if (userRoles.length === 0) {
+      loadUserProfile();
+      return;
+    }
+    if (userRoles.includes("candidate")) {
+      loadOverview();
+    }
+  }, [authToken, userRoles, loadUserProfile, loadOverview]);
+
+  useEffect(() => {
+    if (!isLoggedIn || userRoles.length === 0) return;
+    if (userRoles.includes("candidate")) return;
+    const redirectPath = getRedirectPathForRoles(userRoles);
+    if (redirectPath) {
+      navigate(redirectPath, { replace: true });
+    }
+  }, [isLoggedIn, userRoles, navigate]);
+
+  const rolesLabel = useMemo(() => userRoles.join(", "), [userRoles]);
 
   const handleLogin = async (event) => {
     event.preventDefault();

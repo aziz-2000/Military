@@ -21,40 +21,52 @@ async function fetchRoles(token) {
 }
 
 export default function RequireRole({ allowedRoles, children }) {
-  const [state, setState] = useState({
-    loading: true,
-    allowed: false,
-  });
-
-  useEffect(() => {
+  const initState = () => {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
-      setState({ loading: false, allowed: false });
-      return;
+      return { loading: false, roles: [] };
     }
 
     const storedRoles = localStorage.getItem(ROLES_KEY);
     if (storedRoles) {
       try {
         const roles = JSON.parse(storedRoles);
-        const allowed = allowedRoles.some((role) => roles.includes(role));
-        setState({ loading: false, allowed });
-        return;
+        return { loading: false, roles: Array.isArray(roles) ? roles : [] };
       } catch {
         localStorage.removeItem(ROLES_KEY);
       }
     }
 
+    return { loading: true, roles: [] };
+  };
+
+  const [state, setState] = useState(initState);
+
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token || !state.loading) {
+      return;
+    }
+
+    let active = true;
+
     fetchRoles(token)
       .then((roles) => {
+        if (!active) return;
         localStorage.setItem(ROLES_KEY, JSON.stringify(roles));
-        const allowed = allowedRoles.some((role) => roles.includes(role));
-        setState({ loading: false, allowed });
+        setState({ loading: false, roles });
       })
       .catch(() => {
-        setState({ loading: false, allowed: false });
+        if (!active) return;
+        setState({ loading: false, roles: [] });
       });
-  }, [allowedRoles]);
+
+    return () => {
+      active = false;
+    };
+  }, [state.loading]);
+
+  const isAllowed = allowedRoles.some((role) => state.roles.includes(role));
 
   if (state.loading) {
     return (
@@ -64,7 +76,7 @@ export default function RequireRole({ allowedRoles, children }) {
     );
   }
 
-  if (!state.allowed) {
+  if (!isAllowed) {
     return <Navigate to="/student-portal" replace />;
   }
 
